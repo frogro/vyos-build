@@ -1,0 +1,109 @@
+name: Build VyOS Rock5B Image (Rolling + Armbian)
+
+on:
+  workflow_dispatch:
+    inputs:
+      armbian_release_tag:
+        description: 'Release-Tag in diesem Repo, unter dem das Armbian .img.xz liegt'
+        required: true
+        default: 'armbian-rock5b'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Eigenes Repo auschecken (Skripte)
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: vyos-build (aktuelles rolling) auschecken
+        uses: actions/checkout@v4
+        with:
+          repository: vyos/vyos-build
+          path: vyos-build
+
+      - name: Docker-Buildx einrichten
+        uses: docker/setup-buildx-action@v3
+
+      - name: Benoetigte Werkzeuge installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y 7zip 7zip-standalone squashfs-tools gdisk parted e2fsprogs xz-utils rsync util-linux gh
+
+      - name: Armbian-Image aus Release-Asset laden
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.armbian_release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "*.img.xz" \
+            --dir armbian
+
+      - name: VyOS-Build-Image bauen (nativ, kein --platform noetig)
+        run: |
+          cd vyos-build/docker
+          docker build -t vyos-build:rolling-arm64 .
+
+      - name: VyOS ARM64-Rootfs/ISO bauen
+        run: |
+          cd vyos-build
+          docker run --rm --privileged \
+            --network host \
+            -v "$(pwd)":/vyos \
+            -w /vyos \
+            vyos-build:rolling-arm64 \
+            sudo ./build-vyos-image --architecture arm64 generic
+
+      - name: Rootfs aus ISO extrahieren
+        run: |
+          ISO_FILE=$(find vyos-build/build -maxdepth 1 -iname "*.iso" | head -1)
+          echo "ISO: $ISO_FILE"
+          mkdir -p iso-extract
+          7zz x "$ISO_FILE" -oiso-extract live/filesystem.squashfs -y
+          mkdir -p vyos-rootfs-fresh
+          sudo unsquashfs -f -d vyos-rootfs-fresh iso-extract/live/filesystem.squashfs
+          cd vyos-rootfs-fresh
+          sudo tar -czf ../vyos-rootfs-fresh.tar.gz .
+
+      - name: Merge mit Armbian-Kernel
+        run: |
+          chmod +x repo/scripts/rock5b/merge-vyos-rock5b.sh
+          ARMBIAN_XZ=$(find armbian -iname "*.img.xz" | head -1)
+          sudo ./repo/scripts/rock5b/merge-vyos-rock5b.sh \
+            "$ARMBIAN_XZ" \
+            vyos-rootfs-fresh.tar.gz \
+            out-merged
+
+      - name: Standard-config.boot, AP/Locale-Skripte und armbianEnv.txt einspielen
+        run: |
+          chmod +x repo/scripts/rock5b/inject-defaults.sh
+          WORKDIR=$(mktemp -d)
+          sudo tar xzf out-merged/vyos-rootfs-rock5b-merged.tar.gz -C "$WORKDIR"
+          sudo ./repo/scripts/rock5b/inject-defaults.sh "$WORKDIR" repo/scripts/rock5b/first-boot
+          cd "$WORKDIR"
+          sudo tar czf "${GITHUB_WORKSPACE}/out-merged/vyos-rootfs-rock5b-merged.tar.gz" .
+          cd "${GITHUB_WORKSPACE}"
+          sudo rm -rf "$WORKDIR"
+
+      - name: Finales flashbares Image bauen
+        run: |
+          chmod +x repo/scripts/rock5b/build-vyos-rock5b-image.sh
+          mkdir -p work
+          ARMBIAN_XZ=$(find armbian -iname "*.img.xz" | head -1)
+          sudo env TMPDIR="$(pwd)/work" ./repo/scripts/rock5b/build-vyos-rock5b-image.sh \
+            "$ARMBIAN_XZ" \
+            out-merged/vyos-rootfs-rock5b-merged.tar.gz \
+            vyos-rock5b-fresh.img
+
+      - name: Image komprimieren
+        run: |
+          xz -T0 -6 vyos-rock5b-fresh.img
+
+      - name: Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: vyos-rock5b-image
+          path: vyos-rock5b-fresh.img.xz
+          retention-days: 30
