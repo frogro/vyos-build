@@ -99,7 +99,8 @@ jobs:
 
       - name: Image komprimieren
         run: |
-          xz -T0 -6 vyos-rock5b-fresh.img
+          sudo xz -T0 -6 vyos-rock5b-fresh.img
+          sudo chown $(id -u):$(id -g) vyos-rock5b-fresh.img.xz
 
       - name: Artefakt hochladen
         uses: actions/upload-artifact@v4
