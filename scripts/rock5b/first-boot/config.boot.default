@@ -1,0 +1,27 @@
+interfaces {
+    ethernet eth0 {
+        address "dhcp"
+        description "WAN-LAN-DHCP"
+    }
+    loopback lo {
+    }
+}
+service {
+    ssh {
+    }
+}
+system {
+    console {
+        device ttyS2 {
+            speed "1500000"
+        }
+    }
+    host-name "vyos"
+    login {
+        user vyos {
+            authentication {
+                plaintext-password "vyos"
+            }
+        }
+    }
+}
