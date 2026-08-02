@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       armbian_release_tag:
-        description: 'Release-Tag in diesem Repo, unter dem das Armbian .img.xz liegt'
+        description: 'Release tag in this repo where the Armbian .img.xz is stored'
         required: true
         default: 'armbian-rock5b'
 
@@ -13,26 +13,26 @@ jobs:
     runs-on: ubuntu-24.04-arm
 
     steps:
-      - name: Eigenes Repo auschecken (Skripte)
+      - name: Checkout own repo (scripts)
         uses: actions/checkout@v4
         with:
           path: repo
 
-      - name: vyos-build (aktuelles rolling) auschecken
+      - name: Checkout vyos-build (current rolling)
         uses: actions/checkout@v4
         with:
           repository: vyos/vyos-build
           path: vyos-build
 
-      - name: Docker-Buildx einrichten
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Benoetigte Werkzeuge installieren
+      - name: Install required tools
         run: |
           sudo apt-get update
           sudo apt-get install -y 7zip 7zip-standalone squashfs-tools gdisk parted e2fsprogs xz-utils rsync util-linux gh
 
-      - name: Armbian-Image aus Release-Asset laden
+      - name: Download Armbian image from release asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -41,12 +41,12 @@ jobs:
             --pattern "*.img.xz" \
             --dir armbian
 
-      - name: VyOS-Build-Image bauen (nativ, kein --platform noetig)
+      - name: Build VyOS build image (native, no --platform needed)
         run: |
           cd vyos-build/docker
           docker build -t vyos-build:rolling-arm64 .
 
-      - name: VyOS ARM64-Rootfs/ISO bauen
+      - name: Build VyOS ARM64 rootfs/ISO
         run: |
           cd vyos-build
           docker run --rm --privileged \
@@ -56,7 +56,7 @@ jobs:
             vyos-build:rolling-arm64 \
             sudo ./build-vyos-image --architecture arm64 generic
 
-      - name: Rootfs aus ISO extrahieren
+      - name: Extract rootfs from ISO
         run: |
           ISO_FILE=$(find vyos-build/build -maxdepth 1 -iname "*.iso" | head -1)
           echo "ISO: $ISO_FILE"
@@ -67,7 +67,7 @@ jobs:
           cd vyos-rootfs-fresh
           sudo tar -czf ../vyos-rootfs-fresh.tar.gz .
 
-      - name: Merge mit Armbian-Kernel
+      - name: Merge with Armbian kernel
         run: |
           chmod +x repo/scripts/rock5b/merge-vyos-rock5b.sh
           ARMBIAN_XZ=$(find armbian -iname "*.img.xz" | head -1)
@@ -76,7 +76,7 @@ jobs:
             vyos-rootfs-fresh.tar.gz \
             out-merged
 
-      - name: Standard-config.boot, AP/Locale-Skripte und armbianEnv.txt einspielen
+      - name: Inject default config.boot, AP/locale scripts and armbianEnv.txt
         run: |
           chmod +x repo/scripts/rock5b/inject-defaults.sh
           WORKDIR=$(mktemp -d)
@@ -87,7 +87,7 @@ jobs:
           cd "${GITHUB_WORKSPACE}"
           sudo rm -rf "$WORKDIR"
 
-      - name: Finales flashbares Image bauen
+      - name: Build final flashable image
         run: |
           chmod +x repo/scripts/rock5b/build-vyos-rock5b-image.sh
           mkdir -p work
@@ -97,12 +97,12 @@ jobs:
             out-merged/vyos-rootfs-rock5b-merged.tar.gz \
             vyos-rock5b-fresh.img
 
-      - name: Image komprimieren
+      - name: Compress image
         run: |
           sudo xz -T0 -6 vyos-rock5b-fresh.img
           sudo chown $(id -u):$(id -g) vyos-rock5b-fresh.img.xz
 
-      - name: Artefakt hochladen
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: vyos-rock5b-image
