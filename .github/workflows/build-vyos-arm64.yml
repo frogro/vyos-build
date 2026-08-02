@@ -36,22 +36,14 @@ jobs:
             vyos-build:rolling-arm64 \
             sudo ./build-vyos-image --architecture arm64 generic
 
-      - name: Ergebnis-Dateien auflisten (vollstaendig, rekursiv)
+      - name: Ergebnis-ISO anzeigen
         run: |
-          echo "=== Alle Dateien direkt in vyos-build/ ==="
-          find vyos-build -maxdepth 1 -type f
-          echo "=== Alle .iso/.img/.tar.gz/.raw im gesamten Repo ==="
-          find vyos-build -type f \( -iname "*.iso" -o -iname "*.img" -o -iname "*.raw" -o -iname "*.tar.gz" -o -iname "live-image*" \) 2>/dev/null
+          sudo find vyos-build/build -maxdepth 1 -iname "*.iso" || true
 
       - name: Artefakt hochladen
         uses: actions/upload-artifact@v4
         with:
           name: vyos-arm64-rootfs
-          path: |
-            vyos-build/*.iso
-            vyos-build/*.img
-            vyos-build/*.raw
-            vyos-build/*.tar.gz
-            vyos-build/live-image*
+          path: vyos-build/build/*.iso
           retention-days: 14
           if-no-files-found: warn
