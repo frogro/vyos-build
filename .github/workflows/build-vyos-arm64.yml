@@ -1,0 +1,51 @@
+name: Build VyOS ARM64 Rootfs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vyos-arm64.yml'
+
+jobs:
+  build:
+    # Nativer ARM64-Runner - kein QEMU/Emulation noetig
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout vyos-build
+        uses: actions/checkout@v4
+        with:
+          repository: vyos/vyos-build
+          path: vyos-build
+
+      - name: Docker-Buildx einrichten
+        uses: docker/setup-buildx-action@v3
+
+      - name: VyOS-Build-Image bauen (nativ, kein --platform noetig)
+        run: |
+          cd vyos-build/docker
+          docker build -t vyos-build:rolling-arm64 .
+
+      - name: VyOS ARM64-Rootfs bauen
+        run: |
+          cd vyos-build
+          docker run --rm --privileged \
+            --network host \
+            -v "$(pwd)":/vyos \
+            -w /vyos \
+            vyos-build:rolling-arm64 \
+            sudo ./build-vyos-image --architecture arm64 generic
+
+      - name: Ergebnis-Dateien auflisten
+        run: |
+          find vyos-build -maxdepth 1 -iname "*.iso" -o -iname "*.img"
+
+      - name: Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: vyos-arm64-rootfs
+          path: |
+            vyos-build/*.iso
+            vyos-build/*.img
+          retention-days: 14
