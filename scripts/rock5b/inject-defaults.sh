@@ -1,8 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-# Spielt Standard-config.boot, armbianEnv.txt-Anpassungen und die
-# Erst-Boot-Skripte (AP/Locales) in ein bereits gemergtes VyOS-Rootfs ein.
+# Spielt Standard-config.boot, armbianEnv.txt-Anpassungen, die
+# Erst-Boot-Skripte (AP/Locales/Modem), die noetigen Home-Dotfiles
+# (fuer eine funktionierende interaktive VyOS-CLI) sowie einen
+# systemd-Dienst, der eth0 zuverlaessig hochfaehrt, in ein bereits
+# gemergtes VyOS-Rootfs ein.
 #
 # Aufruf:
 #   sudo ./inject-defaults.sh <merged-rootfs-dir> <script-dir>
@@ -34,7 +37,7 @@ else
     echo "WARNUNG: ${ENV_FILE} nicht gefunden, überspringe." >&2
 fi
 
-echo "==> Erst-Boot-Skripte (AP, Locales) ins Home-Verzeichnis von 'vyos' kopieren"
+echo "==> Erst-Boot-Skripte (AP, Locales, Modem) ins Home-Verzeichnis von 'vyos' kopieren"
 mkdir -p "${MERGED_ROOT}/home/vyos"
 cp "${SCRIPT_DIR}/ap-dhcp-wan-setup.sh" "${MERGED_ROOT}/home/vyos/"
 cp "${SCRIPT_DIR}/set-locales.sh" "${MERGED_ROOT}/home/vyos/"
@@ -42,4 +45,45 @@ cp "${SCRIPT_DIR}/set-locales.sh" "${MERGED_ROOT}/home/vyos/"
 chmod +x "${MERGED_ROOT}/home/vyos/ap-dhcp-wan-setup.sh" "${MERGED_ROOT}/home/vyos/set-locales.sh"
 [[ -f "${MERGED_ROOT}/home/vyos/modem-connect.sh" ]] && chmod +x "${MERGED_ROOT}/home/vyos/modem-connect.sh"
 
-echo "==> Fertig. Standard-Login: vyos / vyos (bitte nach erstem Login aendern)"
+echo "==> Home-Dotfiles (.bashrc, .profile, .bash_logout) einspielen"
+echo "    -> Ohne diese startet die interaktive VyOS-CLI (configure/commit/...) nicht korrekt,"
+echo "       da unser gemergtes Rootfs nie durch den offiziellen VyOS-ISO-Installer lief."
+if [[ -d "${SCRIPT_DIR}/home-dotfiles" ]]; then
+    cp "${SCRIPT_DIR}/home-dotfiles/.bashrc" "${MERGED_ROOT}/home/vyos/.bashrc"
+    cp "${SCRIPT_DIR}/home-dotfiles/.profile" "${MERGED_ROOT}/home/vyos/.profile"
+    cp "${SCRIPT_DIR}/home-dotfiles/.bash_logout" "${MERGED_ROOT}/home/vyos/.bash_logout"
+    # .bash_profile/.bash_login wuerden .profile fuer Login-Shells verdraengen - sicherstellen, dass sie fehlen
+    rm -f "${MERGED_ROOT}/home/vyos/.bash_profile" "${MERGED_ROOT}/home/vyos/.bash_login"
+else
+    echo "WARNUNG: ${SCRIPT_DIR}/home-dotfiles nicht gefunden, Dotfiles NICHT eingespielt!" >&2
+fi
+
+echo "==> Eigentuemer der Home-Verzeichnis-Dateien auf vyos:users setzen"
+chown -R 1000:100 "${MERGED_ROOT}/home/vyos" 2>/dev/null || chown -R vyos:users "${MERGED_ROOT}/home/vyos" 2>/dev/null || true
+
+echo "==> systemd-Dienst anlegen: eth0 zuverlaessig bei jedem Boot hochfahren"
+echo "    -> Workaround, da VyOS/dieses Image eth0 trotz 'address dhcp' nicht"
+echo "       automatisch administrativ hochfaehrt."
+mkdir -p "${MERGED_ROOT}/etc/systemd/system"
+cat > "${MERGED_ROOT}/etc/systemd/system/eth0-force-up.service" << 'UNIT'
+[Unit]
+Description=Force eth0 up (Workaround fuer VyOS/Rock5B Boot-Bug)
+After=vyos-router.service
+Wants=vyos-router.service
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ip link set eth0 up
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+mkdir -p "${MERGED_ROOT}/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/eth0-force-up.service \
+    "${MERGED_ROOT}/etc/systemd/system/multi-user.target.wants/eth0-force-up.service"
+
+echo "==> persistence.conf (VyOS-Live-Mechanik, hier nicht gebraucht) entfernen"
+rm -f "${MERGED_ROOT}/persistence.conf" 2>/dev/null || true
+
+echo "==> Fertig."

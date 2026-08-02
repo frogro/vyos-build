@@ -1,4 +1,16 @@
 #!/bin/vbash
+
+# VyOS Standort-, Zeit- und WLAN-Grundeinstellung
+# Als Benutzer "vyos" starten:
+#   chmod +x /home/vyos/set-locales.sh
+#   /home/vyos/set-locales.sh
+# Nicht mit "sudo bash" oder "bash" starten.
+
+if [ "$(id -u)" -eq 0 ]; then
+    echo "Bitte als Benutzer vyos starten, nicht direkt als root."
+    exit 1
+fi
+
 source /opt/vyatta/etc/functions/script-template
 
 DEFAULT_TZ="Europe/Berlin"
@@ -23,16 +35,12 @@ ask_yes_no() {
     local answer=""
     read -r -p "$prompt [$default]: " answer
     answer="${answer:-$default}"
+
     case "$answer" in
         j|J|ja|JA|y|Y|yes|YES) return 0 ;;
         *) return 1 ;;
     esac
 }
-
-if [ "$(id -u)" -eq 0 ]; then
-    echo "Bitte als Benutzer vyos starten, nicht direkt als root."
-    exit 1
-fi
 
 echo "=== VyOS Standort-, Zeit- und WLAN-Grundeinstellung ==="
 echo "Achtung: Beim Commit kann der WLAN-AP kurz neu starten und SSH abbrechen."
@@ -59,18 +67,18 @@ if ! ask_yes_no "Übernehmen?" "j"; then
     exit 0
 fi
 
-configure
+if ! configure; then
+    echo "Konfigurationsmodus konnte nicht gestartet werden."
+    exit 1
+fi
 
-delete system name-server eth5 2>/dev/null || true
-
-set system time-zone "$TZ_VALUE" 2>/dev/null || true
-set system option keyboard-layout "$KEYBOARD_VALUE" 2>/dev/null || true
-set system wireless country-code "$WIFI_COUNTRY_VALUE" 2>/dev/null || true
-set system name-server "$DNS1" 2>/dev/null || true
-set system name-server "$DNS2" 2>/dev/null || true
-
-set service ntp server "$NTP1" 2>/dev/null || true
-set service ntp server "$NTP2" 2>/dev/null || true
+set system time-zone "$TZ_VALUE" >/dev/null 2>&1 || true
+set system option keyboard-layout "$KEYBOARD_VALUE" >/dev/null 2>&1 || true
+set system wireless country-code "$WIFI_COUNTRY_VALUE" >/dev/null 2>&1 || true
+set system name-server "$DNS1" >/dev/null 2>&1 || true
+set system name-server "$DNS2" >/dev/null 2>&1 || true
+set service ntp server "$NTP1" >/dev/null 2>&1 || true
+set service ntp server "$NTP2" >/dev/null 2>&1 || true
 
 echo
 echo "=== Vorgesehene Änderungen ==="
