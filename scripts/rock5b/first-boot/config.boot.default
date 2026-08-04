@@ -1,27 +1,209 @@
-interfaces {
-    ethernet eth0 {
-        address "dhcp"
-        description "WAN-LAN-DHCP"
-    }
-    loopback lo {
-    }
-}
-service {
-    ssh {
-    }
-}
-system {
-    console {
-        device ttyS2 {
-            speed "1500000"
+firewall {
+    ipv4 {
+        forward {
+            filter {
+                rule 10 {
+                    action "jump"
+                    inbound-interface {
+                        name "eth1"
+                    }
+                    jump-target "PHOTOBOOTH-WAN-IN"
+                }
+                rule 20 {
+                    action "jump"
+                    inbound-interface {
+                        name "wlan1"
+                    }
+                    jump-target "PHOTOBOOTH-AP-OUT"
+                }
+            }
         }
-    }
-    host-name "vyos"
-    login {
-        user vyos {
-            authentication {
-                plaintext-password "vyos"
+        name LAN-TO-WAN {
+            default-action "accept"
+        }
+        name PHOTOBOOTH-AP-OUT {
+            default-action "accept"
+        }
+        name PHOTOBOOTH-WAN-IN {
+            default-action "drop"
+            rule 10 {
+                action "accept"
+                state "established"
+                state "related"
+            }
+        }
+        name WAN-IN {
+            default-action "drop"
+            rule 10 {
+                action "accept"
+                state "established"
+                state "related"
             }
         }
     }
 }
+interfaces {
+    ethernet eth1 {
+        address "dhcp"
+        dhcp-options {
+            default-route-distance "1"
+        }
+        hw-id "f4:4d:30:6f:5b:60"
+    }
+    loopback lo {
+    }
+    wireless wlan0 {
+        hw-id "f8:63:3f:41:be:f0"
+        physical-device "phy1"
+    }
+    wireless wlan1 {
+        address "10.3.141.50/24"
+        channel "36"
+        hw-id "00:c0:ca:b9:5d:25"
+        mode "ac"
+        physical-device "phy0"
+        security {
+            wpa {
+                cipher "CCMP"
+                mode "wpa2"
+                passphrase "photobooth"
+            }
+        }
+        ssid "Photobooth"
+        type "access-point"
+    }
+}
+nat {
+    source {
+        rule 150 {
+            description "AP-NET-to-WIRED-WAN"
+            outbound-interface {
+                name "eth1"
+            }
+            source {
+                address "10.3.141.0/24"
+            }
+            translation {
+                address "masquerade"
+            }
+        }
+        rule 160 {
+            description "AP-NET-to-WWAN"
+            outbound-interface {
+                name "wwan0"
+            }
+            source {
+                address "10.3.141.0/24"
+            }
+            translation {
+                address "masquerade"
+            }
+        }
+    }
+}
+protocols {
+    static {
+        route 0.0.0.0/0 {
+            next-hop 10.206.109.145 {
+                distance "10"
+                interface "wwan0"
+            }
+        }
+    }
+}
+service {
+    dhcp-server {
+        shared-network-name PHOTOBOOTH {
+            subnet 10.3.141.0/24 {
+                option {
+                    default-router "10.3.141.50"
+                    name-server "10.3.141.50"
+                }
+                range 0 {
+                    start "10.3.141.51"
+                    stop "10.3.141.250"
+                }
+                subnet-id "1"
+            }
+        }
+    }
+    dns {
+        forwarding {
+            allow-from "10.3.141.0/24"
+            listen-address "10.3.141.50"
+            name-server 1.1.1.1 {
+            }
+            name-server 8.8.8.8 {
+            }
+        }
+    }
+    ntp {
+        allow-client {
+            address "127.0.0.0/8"
+            address "169.254.0.0/16"
+            address "10.0.0.0/8"
+            address "172.16.0.0/12"
+            address "192.168.0.0/16"
+            address "::1/128"
+            address "fe80::/10"
+            address "fc00::/7"
+        }
+        server time1.vyos.net {
+        }
+        server time2.vyos.net {
+        }
+        server time3.vyos.net {
+        }
+    }
+    ssh {
+        port "22"
+    }
+}
+system {
+    config-management {
+        commit-revisions "100"
+    }
+    console {
+        device ttyS0 {
+            kernel
+            speed "115200"
+        }
+    }
+    host-name "vyos"
+    login {
+        operator-group default {
+            command-policy {
+                allow "*"
+            }
+        }
+        user vyos {
+            authentication {
+                encrypted-password "$6$rounds=656000$lqRMoSvcWHVt3E2C$avujJD9BtXUsZxuGWC4Urgc6WM.KMnakjrRGmRZuWVj2nJX67Ad44jVXXI.J6v3VTBUpaKAK09bIOzSWczeJZ."
+                plaintext-password ""
+            }
+        }
+    }
+    name-server "62.109.121.17"
+    name-server "62.109.121.18"
+    option {
+        reboot-on-upgrade-failure "5"
+    }
+    syslog {
+        local {
+            facility all {
+                level "info"
+            }
+            facility local7 {
+                level "debug"
+            }
+        }
+    }
+    wireless {
+        country-code "de"
+    }
+}
+
+
+// Warning: Do not remove the following line.
+// vyos-config-version: "bgp@8:broadcast-relay@1:cluster@2:config-management@1:conntrack@6:conntrack-sync@2:container@3:dhcp-relay@2:dhcp-server@11:dhcpv6-server@6:dns-dynamic@4:dns-forwarding@4:firewall@20:flow-accounting@3:https@7:ids@2:interfaces@34:ipoe-server@4:ipsec@14:isis@3:l2tp@9:lldp@3:mdns@1:monitoring@2:nat@8:nat66@3:nhrp@1:ntp@3:openconnect@3:openvpn@5:ospf@2:pim@1:pki@1:policy@9:pppoe-server@12:pptp@5:qos@3:quagga@12:reverse-proxy@3:rip@1:rpki@2:snmp@3:ssh@3:sstp@6:system@33:vpp@6:vrf@4:vrrp@4:vyos-accel-ppp@2:wanloadbalance@4:webproxy@2"
+// Release version: 2026.07.11-0033-rolling

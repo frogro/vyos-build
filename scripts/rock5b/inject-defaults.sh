@@ -79,6 +79,11 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
+echo "==> vyos-postconfig-bootup.script einspielen (dynamische eth0-hw-id-Bindung beim ersten Boot)"
+mkdir -p "${MERGED_ROOT}/config/scripts"
+cp "${SCRIPT_DIR}/vyos-postconfig-bootup.script" "${MERGED_ROOT}/config/scripts/vyos-postconfig-bootup.script"
+chmod +x "${MERGED_ROOT}/config/scripts/vyos-postconfig-bootup.script"
+
 mkdir -p "${MERGED_ROOT}/etc/systemd/system/multi-user.target.wants"
 ln -sf /etc/systemd/system/eth0-force-up.service \
     "${MERGED_ROOT}/etc/systemd/system/multi-user.target.wants/eth0-force-up.service"
