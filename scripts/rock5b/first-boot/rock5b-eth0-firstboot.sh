@@ -70,8 +70,22 @@ set interfaces ethernet eth0 address 'dhcp'
 set interfaces ethernet eth0 dhcp-options default-route-distance '1'
 set service ssh port '22'
 
-if ! commit; then
-    echo "$(date -Is) rock5b-eth0-firstboot: commit fehlgeschlagen" >> "$LOG"
+# commit kann kollidieren, wenn VyOS' eigener Boot-Zeit-Commit
+# (aus config.boot) noch nicht abgeschlossen ist ("Configuration system
+# temporarily locked due to another commit in progress"). Bis zu
+# 10x mit kurzer Pause erneut versuchen, statt nur einmal.
+COMMIT_OK=0
+for attempt in $(seq 1 10); do
+    if commit; then
+        COMMIT_OK=1
+        break
+    fi
+    echo "$(date -Is) rock5b-eth0-firstboot: commit fehlgeschlagen (Versuch $attempt/10), warte 3s" >> "$LOG"
+    sleep 3
+done
+
+if [ "$COMMIT_OK" -ne 1 ]; then
+    echo "$(date -Is) rock5b-eth0-firstboot: commit nach 10 Versuchen weiterhin fehlgeschlagen" >> "$LOG"
     discard
     exit 1
 fi
