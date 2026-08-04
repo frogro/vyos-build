@@ -79,10 +79,33 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
-echo "==> vyos-postconfig-bootup.script einspielen (dynamische eth0-hw-id-Bindung beim ersten Boot)"
-mkdir -p "${MERGED_ROOT}/config/scripts"
-cp "${SCRIPT_DIR}/vyos-postconfig-bootup.script" "${MERGED_ROOT}/config/scripts/vyos-postconfig-bootup.script"
-chmod +x "${MERGED_ROOT}/config/scripts/vyos-postconfig-bootup.script"
+echo "==> Eigenen systemd-Dienst fuer dynamische eth0-hw-id-Bindung anlegen"
+echo "    -> VyOS' eigener vyos-postconfig-bootup.script-Hook greift in unserem"
+echo "       gemergten Setup nicht zuverlaessig, daher eigener systemd-Dienst"
+echo "       nach dem bewaehrten eth0-force-up.service-Muster."
+mkdir -p "${MERGED_ROOT}/usr/local/sbin"
+cp "${SCRIPT_DIR}/rock5b-eth0-firstboot.sh" "${MERGED_ROOT}/usr/local/sbin/rock5b-eth0-firstboot.sh"
+chmod +x "${MERGED_ROOT}/usr/local/sbin/rock5b-eth0-firstboot.sh"
+
+cat > "${MERGED_ROOT}/etc/systemd/system/rock5b-eth0-firstboot.service" << 'UNIT2'
+[Unit]
+Description=Rock5B eth0 hw-id dynamisch beim ersten Boot binden
+After=vyos-router.service eth0-force-up.service
+Wants=vyos-router.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rock5b-eth0-firstboot.sh
+RemainAfterExit=yes
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+UNIT2
+
+mkdir -p "${MERGED_ROOT}/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/rock5b-eth0-firstboot.service \
+    "${MERGED_ROOT}/etc/systemd/system/multi-user.target.wants/rock5b-eth0-firstboot.service"
 
 mkdir -p "${MERGED_ROOT}/etc/systemd/system/multi-user.target.wants"
 ln -sf /etc/systemd/system/eth0-force-up.service \
