@@ -90,16 +90,16 @@ chmod +x "${MERGED_ROOT}/usr/local/sbin/rock5b-eth0-firstboot.sh"
 cat > "${MERGED_ROOT}/etc/systemd/system/rock5b-eth0-firstboot.service" << 'UNIT2'
 [Unit]
 Description=Rock5B eth0 hw-id dynamisch beim ersten Boot binden
-After=vyos-router.service eth0-force-up.service
-Wants=vyos-router.service
+After=vyos-router.service eth0-force-up.service nss-lookup.target
+Wants=vyos-router.service nss-lookup.target
 
 [Service]
 Type=oneshot
-Environment=HOME=/root
-Environment=USER=root
-Environment=LOGNAME=root
-Environment=TERM=linux
-ExecStart=/usr/local/sbin/rock5b-eth0-firstboot.sh
+# Volle Login-Shell-Umgebung fuer den Benutzer vyos nachbilden (PAM-Session,
+# .profile/.bashrc, korrektes HOME/USER/Hostname-Umfeld) - genau das, was
+# bei einer echten interaktiven SSH-Sitzung funktioniert, statt nur
+# einzelne Umgebungsvariablen zu setzen.
+ExecStart=/bin/su - vyos -c "sudo /usr/local/sbin/rock5b-eth0-firstboot.sh"
 RemainAfterExit=yes
 TimeoutStartSec=120
 StandardOutput=journal
