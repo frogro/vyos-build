@@ -58,8 +58,11 @@ else
     echo "WARNUNG: ${SCRIPT_DIR}/home-dotfiles nicht gefunden, Dotfiles NICHT eingespielt!" >&2
 fi
 
-echo "==> Eigentuemer der Home-Verzeichnis-Dateien auf vyos:users setzen"
-chown -R 1000:100 "${MERGED_ROOT}/home/vyos" 2>/dev/null || chown -R vyos:users "${MERGED_ROOT}/home/vyos" 2>/dev/null || true
+echo "==> Eigentuemer der konkret eingespielten Dateien auf vyos:users setzen"
+for f in ap-dhcp-wan-setup.sh set-locales.sh modem-connect.sh .bashrc .profile .bash_logout; do
+    [ -f "${MERGED_ROOT}/home/vyos/${f}" ] || continue
+    chown 1000:100 "${MERGED_ROOT}/home/vyos/${f}" 2>/dev/null || chown vyos:users "${MERGED_ROOT}/home/vyos/${f}" 2>/dev/null || true
+done
 
 echo "==> systemd-Dienst anlegen: eth0 zuverlaessig bei jedem Boot hochfahren"
 echo "    -> Workaround, da VyOS/dieses Image eth0 trotz 'address dhcp' nicht"
@@ -92,14 +95,20 @@ cat > "${MERGED_ROOT}/etc/systemd/system/rock5b-eth0-firstboot.service" << 'UNIT
 Description=Rock5B eth0 hw-id dynamisch beim ersten Boot binden
 After=vyos-router.service eth0-force-up.service nss-lookup.target
 Wants=vyos-router.service nss-lookup.target
+ConditionPathExists=!/config/.rock5b-eth0-firstboot-done
 
 [Service]
 Type=oneshot
-# Volle Login-Shell-Umgebung fuer den Benutzer vyos nachbilden (PAM-Session,
-# .profile/.bashrc, korrektes HOME/USER/Hostname-Umfeld) - genau das, was
-# bei einer echten interaktiven SSH-Sitzung funktioniert, statt nur
-# einzelne Umgebungsvariablen zu setzen.
-ExecStart=/bin/su - vyos -c "sudo /usr/local/sbin/rock5b-eth0-firstboot.sh"
+# 'su - vyos' schlaegt hier fehl, weil der vyos-Benutzer zu diesem
+# Boot-Zeitpunkt noch nicht vollstaendig von VyOS' eigenem
+# Konfigurations-Anwendungsprozess angelegt wurde. Stattdessen als root
+# mit expliziter Umgebung ausfuehren; das Skript selbst wartet zusaetzlich
+# auf funktionierende Hostname-Aufloesung vor commit/save.
+Environment=HOME=/root
+Environment=USER=root
+Environment=LOGNAME=root
+Environment=TERM=linux
+ExecStart=/usr/local/sbin/rock5b-eth0-firstboot.sh
 RemainAfterExit=yes
 TimeoutStartSec=120
 StandardOutput=journal
