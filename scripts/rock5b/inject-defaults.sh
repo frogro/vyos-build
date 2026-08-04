@@ -95,9 +95,15 @@ Wants=vyos-router.service
 
 [Service]
 Type=oneshot
+Environment=HOME=/root
+Environment=USER=root
+Environment=LOGNAME=root
+Environment=TERM=linux
 ExecStart=/usr/local/sbin/rock5b-eth0-firstboot.sh
 RemainAfterExit=yes
 TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
