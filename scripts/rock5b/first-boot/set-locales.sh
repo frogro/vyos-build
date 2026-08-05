@@ -83,6 +83,8 @@ CONFIG_FAILED=0
 set system time-zone "$TZ_VALUE" || CONFIG_FAILED=1
 set system option keyboard-layout "$KEYBOARD_VALUE" || CONFIG_FAILED=1
 set system wireless country-code "$WIFI_COUNTRY_VALUE" || CONFIG_FAILED=1
+delete system name-server 2>/dev/null || true
+delete service ntp server 2>/dev/null || true
 set system name-server "$DNS1" || CONFIG_FAILED=1
 set system name-server "$DNS2" || CONFIG_FAILED=1
 set service ntp server "$NTP1" || CONFIG_FAILED=1
@@ -96,7 +98,15 @@ fi
 
 echo
 echo '=== Proposed changes ==='
-compare
+CHANGES="$(compare 2>/dev/null || true)"
+printf '%s\n' "$CHANGES"
+
+if [ -z "$CHANGES" ]; then
+    discard 2>/dev/null || true
+    exit
+    echo 'No configuration changes were required.'
+    builtin exit 0
+fi
 echo
 
 if ! ask_yes_no 'Commit and save? An active access point may restart briefly.' 'y'; then
