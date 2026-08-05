@@ -101,7 +101,7 @@ echo '=== Proposed changes ==='
 CHANGES="$(compare 2>/dev/null || true)"
 printf '%s\n' "$CHANGES"
 
-if [ -z "$CHANGES" ]; then
+if [ -z "$CHANGES" ] || printf '%s\n' "$CHANGES" | grep -q '^No changes between working and active configurations\.$'; then
     discard 2>/dev/null || true
     exit
     echo 'No configuration changes were required.'
