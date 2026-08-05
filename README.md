@@ -7,6 +7,23 @@
 [![Build Status](https://img.shields.io/github/actions/workflow/status/frogro/vyos-build/build-vyos-rock5b.yml?branch=rolling&style=for-the-badge)](https://github.com/frogro/vyos-build/actions/workflows/build-vyos-rock5b.yml)
 [![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/FGrootens)
 
+![VyOS Rolling running on a Radxa ROCK 5B over SSH](docs/images/vyos-rock5b-ssh.png)
+
+## Table of Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [First Boot and Login](#first-boot-and-login)
+- [Optional Helper Scripts](#optional-helper-scripts)
+- [Supported Hardware](#supported-hardware)
+- [Build from Source](#build-from-source)
+- [Build Design](#build-design)
+- [Releases](#releases)
+- [Changelog](CHANGELOG.md)
+- [Updating from Upstream](#updating-from-upstream)
+- [License and Trademarks](#license-and-trademarks)
+- [Support the Project](#️-support-the-project)
+
 This repository provides an unofficial VyOS image for the Radxa ROCK 5B by combining:
 
 - the VyOS ARM64 userspace and configuration system;
@@ -21,17 +38,18 @@ This repository provides an unofficial VyOS image for the Radxa ROCK 5B by combi
 - ROCK 5B boot through the Armbian boot chain
 - HDMI and serial console
 - Realtek RTL8125 Ethernet through the `r8169` driver
-- Predictable wired interface name `eth0`
+- Deterministic Ethernet interface naming as `eth0`
 - Automatic wired WAN setup on first boot:
+  - dynamic binding to the board's actual Ethernet MAC address
   - DHCP on the detected Ethernet interface
   - default-route distance `1`
   - SSH enabled
-- Optional wireless access point and DHCP setup
-- Optional modem setup
+- Optional wireless access point, DHCP server, DNS forwarding, and NAT
+- Optional LTE/5G modem support
 - GitHub Actions workflow for reproducible image builds
 - Ready-to-flash compressed image published through GitHub Releases
 
-The first-boot Ethernet setup starts after VyOS has completed its normal boot configuration. It saves Ethernet and SSH settings to `/config/config.boot`, starts the persistent VyOS DHCP client, and disables its first-boot timer after success.
+The first-boot Ethernet setup starts after VyOS has completed its normal boot configuration. It saves Ethernet and SSH settings to `/config/config.boot`, starts the persistent VyOS DHCP client, verifies that SSH is listening, and disables its own first-boot timer after success.
 
 ---
 
@@ -94,14 +112,23 @@ sudo eject /dev/sdX
 
 ---
 
-## First Boot
+## First Boot and Login
 
 1. Connect the ROCK 5B Ethernet port to a network that provides DHCP.
 2. Insert or attach the flashed boot drive.
 3. Power on the ROCK 5B.
 4. Allow approximately 60–90 seconds for first-boot configuration.
 5. Find the assigned address in your router or DHCP server.
-6. Connect over SSH:
+6. Connect over SSH.
+
+Default credentials for this image:
+
+```text
+Username: vyos
+Password: vyos
+```
+
+Example:
 
 ```bash
 ssh vyos@192.168.1.100
@@ -109,13 +136,27 @@ ssh vyos@192.168.1.100
 
 Replace the example address with the address assigned to your ROCK 5B.
 
+> [!IMPORTANT]
+> Change the default password immediately after the first login. For stronger security, configure SSH key authentication and stop using password-based login.
+
+Change the password:
+
+```text
+configure
+set system login user vyos authentication plaintext-password 'YOUR_NEW_PASSWORD'
+commit
+save
+exit
+```
+
 Check Ethernet locally from the HDMI or serial console:
 
 ```bash
 ip -4 -br addr show eth0
 ```
 
-First-boot diagnostics:
+<details>
+<summary><strong>First-boot diagnostics</strong></summary>
 
 ```bash
 cat /config/dhcp-wan-firstboot-wrapper.log
@@ -128,6 +169,8 @@ The first-boot marker is:
 ```text
 /config/.dhcp-wan-ssh-firstboot-done
 ```
+
+</details>
 
 ---
 
@@ -159,11 +202,14 @@ Modem support depends on the modem, transport, drivers, firmware, carrier, and A
 
 `ap-dhcp-wan-setup.sh` does not hard-code a specific chipset. It enumerates every `phy` under `/sys/class/ieee80211`, reads supported interface modes from the kernel with `iw phy <phy> info`, and only offers devices that report AP mode support.
 
-Known to work well:
+#### Known working hardware
 
 - MediaTek MT7921-class M.2/PCIe Wi-Fi 6 adapters
 - Realtek RTL8852-class M.2/PCIe Wi-Fi 6 adapters
 - MediaTek MT7612U-based USB adapters
+
+#### Expected to work
+
 - Other Linux `mac80211` adapters that advertise AP mode
 
 Adapters whose drivers only support client or station mode cannot be used by the AP helper.
@@ -180,11 +226,11 @@ dmesg
 
 `modem-connect.sh` supports PCIe- and USB-attached modems through ModemManager using QMI or MBIM, as well as a raw AT/RNDIS fallback path.
 
-Tested and confirmed working:
+#### Tested and confirmed working
 
 - Fibocom FM350-GL, including automatic FCC unlock over the AT port
 
-Expected to work with compatible drivers and firmware:
+#### Expected to work with compatible drivers and firmware
 
 - Quectel RM505Q
 - Intel XMM7560-based modems
@@ -203,6 +249,8 @@ The repository includes:
 ```text
 .github/workflows/build-vyos-rock5b.yml
 ```
+
+No local ARM64 build environment is required when using the GitHub Actions workflow.
 
 From the GitHub website:
 
@@ -271,6 +319,8 @@ SHA256SUMS
 ```
 
 The raw `.img` file is approximately 6 GB and is therefore not suitable as a normal GitHub Release asset. Publish the compressed `.img.xz` file instead.
+
+See [CHANGELOG.md](CHANGELOG.md) for the changes in each release.
 
 ---
 
