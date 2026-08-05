@@ -50,4 +50,3 @@ if [ "$AUTO" -eq 1 ]; then
   touch "$MARKER"; chmod 600 "$MARKER"
 fi
 log "FERTIG: $WIRED_IF auf DHCP, Routendistanz $ROUTE_DISTANCE, SSH aktiviert"
-exit 0
