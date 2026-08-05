@@ -1,15 +1,5 @@
 #!/bin/sh
-LOG="/config/rock5b-postconfig.log"
-MARKER="/config/.dhcp-wan-ssh-firstboot-done"
-UNIT="rock5b-dhcp-wan-ssh-firstboot"
-SCRIPT="/home/vyos/dhcp-wan-ssh-setup.sh"
-[ -e "$MARKER" ] && exit 0
-printf '%s %s\n' "$(date -Is)" "rock5b-postconfig: plane $SCRIPT als Benutzer vyos mit 30 Sekunden Verzögerung" >> "$LOG"
-/bin/systemctl reset-failed "${UNIT}.service" "${UNIT}.timer" >/dev/null 2>&1 || true
-if /usr/bin/systemd-run --unit="$UNIT" --on-active=30s --property=Type=oneshot --property=TimeoutStartSec=600 --property=StandardOutput=journal --property=StandardError=journal /usr/sbin/runuser -u vyos -- /bin/vbash -lc "$SCRIPT --auto" >> "$LOG" 2>&1; then
-  printf '%s %s\n' "$(date -Is)" "rock5b-postconfig: ${UNIT}.service eingeplant" >> "$LOG"
-  exit 0
-fi
-RC=$?
-printf '%s %s\n' "$(date -Is)" "rock5b-postconfig: FEHLER beim Einplanen, rc=$RC" >> "$LOG"
-exit "$RC"
+# Intentionally empty.
+# The Rock5B wired DHCP WAN first-boot setup is handled by:
+#   rock5b-dhcp-wan-firstboot.timer
+exit 0

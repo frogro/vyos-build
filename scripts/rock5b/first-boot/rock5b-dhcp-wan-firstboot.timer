@@ -1,0 +1,11 @@
+[Unit]
+Description=Delay Rock5B wired DHCP WAN first-boot setup
+
+[Timer]
+OnBootSec=60s
+OnUnitInactiveSec=30s
+Unit=rock5b-dhcp-wan-firstboot.service
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
