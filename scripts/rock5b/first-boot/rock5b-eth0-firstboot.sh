@@ -108,10 +108,10 @@ if ! ip -4 addr show eth0 | grep -q "inet "; then
     dhclient eth0 >> "$LOG" 2>&1 || true
 fi
 
-if ! ss -ltn 2>/dev/null | grep -q ':22 '; then
-    echo "$(date -Is) rock5b-eth0-firstboot: SSH lauscht noch nicht, starte ssh-Dienst neu" >> "$LOG"
-    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-fi
+# HINWEIS: Kein SSH-Neustart-Fallback mehr - VyOS' eigenes service_ssh.py
+# startet ssh@default.service bereits korrekt beim commit. Ein zusaetzlicher
+# "systemctl restart ssh" hat sich als schaedlich erwiesen (SIGTERM auf die
+# bereits laufende ssh@default.service-Instanz, Port-Konflikt).
 
 echo "$(date -Is) rock5b-eth0-firstboot: Fertig. eth0: $(ip -4 addr show eth0 | grep 'inet ' || echo 'keine IP')" >> "$LOG"
 touch "$MARKER"
