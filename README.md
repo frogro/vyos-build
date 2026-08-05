@@ -7,7 +7,7 @@
 [![Build Status](https://img.shields.io/github/actions/workflow/status/frogro/vyos-build/build-vyos-rock5b.yml?branch=rolling&style=for-the-badge)](https://github.com/frogro/vyos-build/actions/workflows/build-vyos-rock5b.yml)
 [![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/FGrootens)
 
-![VyOS Rolling running on a Radxa ROCK 5B over SSH](docs/images/vyos-rock5b-ssh.png)
+![VyOS Rolling for Radxa ROCK 5B](docs/images/rock5b-banner.png)
 
 ## Table of Contents
 
@@ -20,7 +20,8 @@
 - [Build Design](#build-design)
 - [Releases](#releases)
 - [Changelog](CHANGELOG.md)
-- [Updating from Upstream](#updating-from-upstream)
+- [Contributing](CONTRIBUTING.md)
+- [Security](SECURITY.md)
 - [License and Trademarks](#license-and-trademarks)
 - [Support the Project](#️-support-the-project)
 
@@ -31,7 +32,7 @@ This repository provides an unofficial VyOS image for the Radxa ROCK 5B by combi
 - ROCK 5B-specific first-boot networking helpers.
 
 > [!WARNING]
-> This is an unofficial community build. It is not produced, supported, or endorsed by the VyOS project or Radxa. Rolling releases may contain regressions and should be tested before production use.
+> This is an independent community project. It is not produced, supported, sponsored, or endorsed by the VyOS project, Sentrium S.L., Radxa, or Radxa Computer Co., Ltd. Rolling releases may contain regressions and should be tested before production use.
 
 ## Features
 
@@ -44,10 +45,11 @@ This repository provides an unofficial VyOS image for the Radxa ROCK 5B by combi
   - DHCP on the detected Ethernet interface
   - default-route distance `1`
   - SSH enabled
+  - verification that the DHCP address remains active
 - Optional wireless access point, DHCP server, DNS forwarding, and NAT
 - Optional LTE/5G modem support
 - GitHub Actions workflow for reproducible image builds
-- Ready-to-flash compressed image published through GitHub Releases
+- Ready-to-flash compressed images published through GitHub Releases
 
 The first-boot Ethernet setup starts after VyOS has completed its normal boot configuration. It saves Ethernet and SSH settings to `/config/config.boot`, starts the persistent VyOS DHCP client, verifies that SSH is listening, and disables its own first-boot timer after success.
 
@@ -324,25 +326,13 @@ See [CHANGELOG.md](CHANGELOG.md) for the changes in each release.
 
 ---
 
-## Updating from Upstream
-
-This repository contains ROCK 5B-specific changes on top of VyOS build sources. Review upstream changes before syncing or rebasing, especially changes involving:
-
-- ARM64 image generation
-- boot and root filesystem assembly
-- systemd and first-boot services
-- interface naming
-- VyOS configuration migration
-
-Always keep a backup branch or tag before a major upstream synchronization.
-
----
-
 ## License and Trademarks
 
 The repository contains or builds software from multiple upstream projects. Their respective licenses remain in effect. Review the license and copyright files included in the repository and generated image.
 
-VyOS is a trademark of Sentrium S.L. Radxa and ROCK 5B are associated with Radxa Computer Co., Ltd. This project is an independent community effort.
+“VyOS” and its associated marks are trademarks of their respective owner. “Radxa”, “ROCK 5B”, and associated marks are trademarks of Radxa Computer Co., Ltd. Names are used only to identify compatibility and upstream components.
+
+This project does not include or redistribute third-party logo artwork and does not claim affiliation, sponsorship, or endorsement.
 
 ---
 

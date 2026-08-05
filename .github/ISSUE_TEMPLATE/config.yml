@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: VyOS documentation
+    url: https://docs.vyos.io/
+    about: Upstream VyOS configuration and command reference
+  - name: Radxa documentation
+    url: https://docs.radxa.com/
+    about: ROCK 5B hardware documentation
