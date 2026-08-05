@@ -26,4 +26,4 @@ For a ready-to-use system, download the latest main ROCK 5B release instead:
 - Not intended for direct end-user installation
 - Not a complete VyOS image
 - Intended as a build dependency and reproducibility asset
-- Independent community work; no official endorsement is claimed
+- Independent community work; no affiliation, sponsorship, certification, or endorsement by Armbian or Armbian d.o.o. is claimed

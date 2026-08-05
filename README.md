@@ -31,8 +31,10 @@ This repository provides an unofficial VyOS image for the Radxa ROCK 5B by combi
 - an Armbian ROCK 5B kernel, firmware, modules, and boot chain;
 - ROCK 5B-specific first-boot networking helpers.
 
+**Upstream attribution:** VyOS provides the routing userspace and configuration framework; Armbian provides the ROCK 5B boot chain, Linux kernel, modules, firmware, and device-tree support; Radxa designs and documents the ROCK 5B hardware.
+
 > [!WARNING]
-> This is an independent community project. It is not produced, supported, sponsored, or endorsed by the VyOS project, Sentrium S.L., Radxa, or Radxa Computer Co., Ltd. Rolling releases may contain regressions and should be tested before production use.
+> This is an independent community project built from components provided by **VyOS**, **Armbian**, and **Radxa** ecosystems. It is not produced, supported, sponsored, certified, or endorsed by the VyOS project, Sentrium S.L., Armbian, Armbian d.o.o., Radxa, or Radxa Computer Co., Ltd. Rolling releases may contain regressions and should be tested before production use.
 
 ## Features
 
@@ -330,9 +332,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the changes in each release.
 
 The repository contains or builds software from multiple upstream projects. Their respective licenses remain in effect. Review the license and copyright files included in the repository and generated image.
 
-“VyOS” and its associated marks are trademarks of their respective owner. “Radxa”, “ROCK 5B”, and associated marks are trademarks of Radxa Computer Co., Ltd. Names are used only to identify compatibility and upstream components.
+“VyOS” and associated marks are trademarks of their respective owner. “Armbian” and associated marks are trademarks of Armbian d.o.o. “Radxa”, “ROCK 5B”, and associated marks are trademarks of Radxa Computer Co., Ltd.
 
-This project does not include or redistribute third-party logo artwork and does not claim affiliation, sponsorship, or endorsement.
+These names are used solely to identify compatibility, upstream software, boot-chain and kernel components, and supported hardware. No affiliation, sponsorship, certification, or endorsement is claimed.
+
+This repository does not redistribute third-party logo artwork.
 
 ---
 

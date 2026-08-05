@@ -53,7 +53,7 @@ ssh vyos@DEVICE_IP
 - This is a VyOS rolling image and may contain regressions.
 - Test carefully before production use.
 - Wireless AP and modem setup are optional and are not enabled automatically.
-- This is an independent community build and is not produced, supported, sponsored, or endorsed by VyOS, Sentrium S.L., Radxa, or Radxa Computer Co., Ltd.
+- This is an independent community build and is not produced, supported, sponsored, certified, or endorsed by VyOS, Sentrium S.L., Armbian, Armbian d.o.o., Radxa, or Radxa Computer Co., Ltd.
 
 ## Documentation
 
