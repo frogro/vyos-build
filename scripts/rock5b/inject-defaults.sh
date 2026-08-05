@@ -93,7 +93,7 @@ chmod +x "${MERGED_ROOT}/usr/local/sbin/rock5b-eth0-firstboot.sh"
 cat > "${MERGED_ROOT}/etc/systemd/system/rock5b-eth0-firstboot.service" << 'UNIT2'
 [Unit]
 Description=Rock5B eth0 hw-id dynamisch beim ersten Boot binden
-After=vyos-router.service eth0-force-up.service nss-lookup.target
+After=vyos-router.service eth0-force-up.service nss-lookup.target dbus.service polkit.service
 Wants=vyos-router.service nss-lookup.target
 ConditionPathExists=!/config/.rock5b-eth0-firstboot-done
 

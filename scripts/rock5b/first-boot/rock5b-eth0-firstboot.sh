@@ -43,10 +43,17 @@ echo "$(date -Is) rock5b-eth0-firstboot: Erkannte MAC $MAC" >> "$LOG"
 # warten (verhindert "Failed to generate committed config" bei zu
 # frueher Ausfuehrung). Bis zu 60s, mit klarem Abbruch statt stillem
 # Weiterlaufen bei Timeout.
+# Zusaetzlich zu vyos-configd/vyos-hostsd/Hostname-Aufloesung auch D-Bus
+# und Polkit abwarten. VyOS' service_ssh.py startet ssh@default.service
+# ueber systemd-Unit-Management (D-Bus/Polkit) - ist das noch nicht
+# bereit, "gelingt" der commit zwar, aber ssh@default.service wird
+# nicht tatsaechlich gestartet.
 READY=0
 for i in $(seq 1 60); do
     if systemctl is-active --quiet vyos-configd 2>/dev/null \
        && systemctl is-active --quiet vyos-hostsd 2>/dev/null \
+       && systemctl is-active --quiet dbus 2>/dev/null \
+       && systemctl is-active --quiet polkit 2>/dev/null \
        && getent hosts "$(hostname)" >/dev/null 2>&1; then
         READY=1
         break
@@ -55,11 +62,15 @@ for i in $(seq 1 60); do
 done
 
 if [ "$READY" -ne 1 ]; then
-    echo "$(date -Is) rock5b-eth0-firstboot: vyos-configd/vyos-hostsd/Hostname-Aufloesung nach 60s nicht bereit, breche ab." >> "$LOG"
+    echo "$(date -Is) rock5b-eth0-firstboot: vyos-configd/vyos-hostsd/dbus/polkit/Hostname-Aufloesung nach 60s nicht bereit, breche ab." >> "$LOG"
     echo "$(date -Is) rock5b-eth0-firstboot: systemd wird beim naechsten Boot erneut versuchen (kein Marker gesetzt)." >> "$LOG"
     exit 1
 fi
-echo "$(date -Is) rock5b-eth0-firstboot: vyos-configd/vyos-hostsd/Hostname-Aufloesung bereit" >> "$LOG"
+echo "$(date -Is) rock5b-eth0-firstboot: vyos-configd/vyos-hostsd/dbus/polkit/Hostname-Aufloesung bereit" >> "$LOG"
+
+# Zusaetzliche Sicherheitspuffer-Wartezeit: D-Bus/Polkit "aktiv" heisst
+# nicht zwingend sofort voll funktionsfaehig fuer Unit-Management-Calls.
+sleep 5
 
 source /opt/vyatta/etc/functions/script-template
 configure
