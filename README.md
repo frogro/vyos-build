@@ -1,6 +1,13 @@
 # VyOS for Radxa ROCK 5B
 
-Unofficial VyOS rolling image for the **Radxa ROCK 5B**, built by combining:
+> Unofficial community build of **VyOS Rolling** for the **Radxa ROCK 5B**.
+
+[![GitHub Release](https://img.shields.io/github/v/release/frogro/vyos-build?style=for-the-badge)](https://github.com/frogro/vyos-build/releases)
+[![GitHub Downloads](https://img.shields.io/github/downloads/frogro/vyos-build/total?style=for-the-badge)](https://github.com/frogro/vyos-build/releases)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/frogro/vyos-build/build-vyos-rock5b.yml?branch=rolling&style=for-the-badge)](https://github.com/frogro/vyos-build/actions/workflows/build-vyos-rock5b.yml)
+[![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/FGrootens)
+
+This repository provides an unofficial VyOS image for the Radxa ROCK 5B by combining:
 
 - the VyOS ARM64 userspace and configuration system;
 - an Armbian ROCK 5B kernel, firmware, modules, and boot chain;
@@ -9,24 +16,30 @@ Unofficial VyOS rolling image for the **Radxa ROCK 5B**, built by combining:
 > [!WARNING]
 > This is an unofficial community build. It is not produced, supported, or endorsed by the VyOS project or Radxa. Rolling releases may contain regressions and should be tested before production use.
 
-## What works
+## Features
 
 - ROCK 5B boot through the Armbian boot chain
 - HDMI and serial console
 - Realtek RTL8125 Ethernet through the `r8169` driver
 - Predictable wired interface name `eth0`
-- Automatic wired WAN setup on the first boot:
+- Automatic wired WAN setup on first boot:
   - DHCP on the detected Ethernet interface
   - default-route distance `1`
   - SSH enabled
-- Optional wireless AP and DHCP setup through the included helper script
-- Optional modem setup through the included modem helper script
+- Optional wireless access point and DHCP setup
+- Optional modem setup
+- GitHub Actions workflow for reproducible image builds
+- Ready-to-flash compressed image published through GitHub Releases
 
-The first-boot Ethernet setup starts after VyOS has completed its normal boot configuration. It saves the Ethernet and SSH settings to `/config/config.boot`, starts the persistent VyOS DHCP client, and disables its own first-boot timer after success.
+The first-boot Ethernet setup starts after VyOS has completed its normal boot configuration. It saves Ethernet and SSH settings to `/config/config.boot`, starts the persistent VyOS DHCP client, and disables its first-boot timer after success.
 
-## Download a ready-to-use image
+---
 
-Open the repository's **Releases** page and download:
+## Quick Start
+
+### 1. Download the ready-to-use image
+
+Open the [Releases page](https://github.com/frogro/vyos-build/releases) and download:
 
 ```text
 vyos-rock5b-fresh.img.xz
@@ -39,14 +52,14 @@ Verify the download on Linux:
 sha256sum -c SHA256SUMS
 ```
 
-The uncompressed image is approximately 6 GB. Use a target drive larger than the image; an 8 GB or larger SD card, eMMC module, NVMe SSD, or USB drive is recommended.
+The uncompressed image is approximately 6 GB. Use a target drive larger than the image. An 8 GB or larger SD card, eMMC module, NVMe SSD, or USB drive is recommended.
 
-## Flash with balenaEtcher
+### 2. Flash with balenaEtcher
 
 [balenaEtcher](https://etcher.balena.io/) is available for Linux, Windows, and macOS.
 
 1. Start balenaEtcher.
-2. Select `vyos-rock5b-fresh.img.xz` directly. Manual extraction is normally not required.
+2. Select `vyos-rock5b-fresh.img.xz` directly.
 3. Select the SD card, eMMC module, SSD, or USB drive.
 4. Click **Flash**.
 5. Wait for flashing and verification to finish.
@@ -54,36 +67,34 @@ The uncompressed image is approximately 6 GB. Use a target drive larger than the
 > [!CAUTION]
 > Flashing destroys all data on the selected target drive. Verify the destination carefully.
 
-## Flash from Linux with `dd`
-
-### Option A: write the compressed image directly
+### 3. Flash from Linux with `dd`
 
 Replace `/dev/sdX` with the complete target device, not a partition such as `/dev/sdX1`.
+
+#### Option A: write the compressed image directly
 
 ```bash
 sudo umount /dev/sdX?* 2>/dev/null || true
 xz -dc vyos-rock5b-fresh.img.xz | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
 sync
+sudo eject /dev/sdX
 ```
 
-### Option B: extract first, then write
+#### Option B: extract first, then write
 
-This may be faster on slower computers because decompression and writing do not occur simultaneously.
+This may be faster on slower systems because decompression and writing do not occur simultaneously.
 
 ```bash
 xz -dk vyos-rock5b-fresh.img.xz
 sudo umount /dev/sdX?* 2>/dev/null || true
 sudo dd if=vyos-rock5b-fresh.img of=/dev/sdX bs=4M status=progress conv=fsync
 sync
-```
-
-Safely eject the drive when finished:
-
-```bash
 sudo eject /dev/sdX
 ```
 
-## First boot
+---
+
+## First Boot
 
 1. Connect the ROCK 5B Ethernet port to a network that provides DHCP.
 2. Insert or attach the flashed boot drive.
@@ -118,7 +129,9 @@ The first-boot marker is:
 /config/.dhcp-wan-ssh-firstboot-done
 ```
 
-## Optional helper scripts
+---
+
+## Optional Helper Scripts
 
 The image includes helper scripts in `/home/vyos`.
 
@@ -128,7 +141,7 @@ The image includes helper scripts in `/home/vyos`.
 /home/vyos/ap-dhcp-wan-setup.sh
 ```
 
-This is separate from the automatic wired DHCP/SSH setup. Run it only when an access point, DHCP server, DNS forwarding, and NAT are required.
+This is separate from the automatic wired DHCP and SSH setup. Run it only when an access point, DHCP server, DNS forwarding, and NAT are required.
 
 ### Configure a modem
 
@@ -138,60 +151,72 @@ sudo /home/vyos/modem-connect.sh
 
 Modem support depends on the modem, transport, drivers, firmware, carrier, and APN.
 
-## Supported wireless cards and modems
+---
 
-### Wi-Fi adapters (for the optional access point script)
+## Supported Hardware
 
-`ap-dhcp-wan-setup.sh` does not hard-code a specific chipset. It enumerates every `phy` under `/sys/class/ieee80211`, reads each one's supported interface modes directly from the kernel (`iw phy <phy> info`), and only offers devices that report **AP (access-point) mode** support. Any Wi-Fi adapter with a Linux `mac80211`-based driver that advertises AP mode should work automatically, without needing to be listed anywhere.
+### Wi-Fi adapters
 
-**Known to work well on ROCK 5B:**
+`ap-dhcp-wan-setup.sh` does not hard-code a specific chipset. It enumerates every `phy` under `/sys/class/ieee80211`, reads supported interface modes from the kernel with `iw phy <phy> info`, and only offers devices that report AP mode support.
 
-- **M.2/PCIe, onboard-style cards** — MediaTek MT7921-class and Realtek RTL8852-class M.2 Wi-Fi 6 (802.11ax) modules, as commonly bundled with ROCK 5B kits (e.g. AP6275P-type modules). These typically expose both 2.4GHz and 5GHz AP-capable radios and are detected automatically.
-- **USB adapters** — MediaTek MT7612U-based USB dongles (802.11ac, dual-band, AP-capable) have been tested and work reliably. Most `mt76`-driven and `rtl88xxau`-driven USB adapters that support AP mode should work the same way.
+Known to work well:
 
-**Generally not usable for the AP script:**
+- MediaTek MT7921-class M.2/PCIe Wi-Fi 6 adapters
+- Realtek RTL8852-class M.2/PCIe Wi-Fi 6 adapters
+- MediaTek MT7612U-based USB adapters
+- Other Linux `mac80211` adapters that advertise AP mode
 
-- Adapters whose driver only supports client/station mode (no AP mode in `mac80211`) — the script will list them but exclude them from the selectable AP device list.
-- Some cheap Realtek RTL8188-class USB dongles have unreliable or missing AP-mode support depending on driver version.
+Adapters whose drivers only support client or station mode cannot be used by the AP helper.
 
-If a card is not detected at all, first check `ip link show` / `iw dev` to confirm Linux sees the radio, and `dmesg` for driver load errors.
+Useful diagnostics:
 
-### Cellular modems (for the optional modem script)
+```bash
+ip link show
+iw dev
+dmesg
+```
 
-`modem-connect.sh` supports PCIe- and USB-attached modems through ModemManager (QMI/MBIM) as well as a raw AT/RNDIS fallback path. It auto-detects the transport and backend rather than requiring a fixed modem list.
+### Cellular modems
 
-**Tested and confirmed working:**
+`modem-connect.sh` supports PCIe- and USB-attached modems through ModemManager using QMI or MBIM, as well as a raw AT/RNDIS fallback path.
 
-- **Fibocom FM350-GL** (PCIe or USB, `mtk_t7xx` driver) — including automatic FCC unlock over the AT port.
+Tested and confirmed working:
 
-**Expected to work (same backend/driver family, not individually verified on this image):**
+- Fibocom FM350-GL, including automatic FCC unlock over the AT port
 
-- **Quectel RM505Q** (PCIe/USB, QMI/MBIM)
-- **Intel-based modems using the XMM7560 chipset** (USB, MBIM)
-- Most other QMI- or MBIM-capable modems supported by ModemManager, since the script talks to the modem through ModemManager rather than a chipset-specific driver path.
+Expected to work with compatible drivers and firmware:
 
-Modem support in practice also depends on the SIM carrier, APN settings, and regional firmware/band locking — a modem being electrically and driver-wise supported does not guarantee a given carrier will connect without additional APN configuration.
+- Quectel RM505Q
+- Intel XMM7560-based modems
+- Other QMI- or MBIM-capable modems supported by ModemManager
 
-## Build the image with GitHub Actions
+Actual connectivity also depends on the SIM carrier, APN, regional firmware, and supported bands.
 
-The repository includes the workflow:
+---
+
+## Build from Source
+
+### Build with GitHub Actions
+
+The repository includes:
 
 ```text
 .github/workflows/build-vyos-rock5b.yml
 ```
 
-### Build from the GitHub website
+From the GitHub website:
 
 1. Fork or clone this repository.
 2. Open **Actions**.
 3. Select **Build VyOS Rock5B Image (Rolling + Armbian)**.
-4. Click **Run workflow** and select the `rolling` branch.
-5. Wait for the workflow to finish.
-6. Download the `vyos-rock5b-image` artifact from the completed run.
+4. Click **Run workflow**.
+5. Select the `rolling` branch.
+6. Wait for the workflow to finish.
+7. Download the `vyos-rock5b-image` artifact.
 
 ### Build with GitHub CLI
 
-Install and authenticate GitHub CLI, then run:
+Authenticate and start the workflow:
 
 ```bash
 gh auth login
@@ -200,7 +225,7 @@ sleep 5
 gh run list --repo OWNER/vyos-build --workflow=build-vyos-rock5b.yml --limit 1
 ```
 
-Watch the run using the displayed run ID:
+Watch the run:
 
 ```bash
 gh run watch RUN_ID --repo OWNER/vyos-build --exit-status
@@ -219,9 +244,11 @@ The compressed image is normally located at:
 ~/Downloads/vyos-rock5b-RUN_ID/vyos-rock5b-image/vyos-rock5b-fresh.img.xz
 ```
 
-Replace `OWNER` with your GitHub username and `RUN_ID` with the actual workflow run ID.
+Replace `OWNER` with your GitHub username and `RUN_ID` with the workflow run ID.
 
-## Build design
+---
+
+## Build Design
 
 The image is assembled from two main components:
 
@@ -230,49 +257,51 @@ The image is assembled from two main components:
 
 The build process keeps the Armbian-compatible physical image and boot chain, merges the VyOS root filesystem with the ROCK 5B kernel components, injects the default configuration and helper scripts, and creates a flashable disk image.
 
-## Create a GitHub Release
+---
 
-Generate a checksum for the compressed image:
+## Releases
 
-```bash
-cd /path/to/vyos-rock5b-image
-sha256sum vyos-rock5b-fresh.img.xz > SHA256SUMS
+Prebuilt images are published on the [GitHub Releases page](https://github.com/frogro/vyos-build/releases).
+
+Each release should normally contain:
+
+```text
+vyos-rock5b-fresh.img.xz
+SHA256SUMS
 ```
 
-Create a release and upload the compressed image and checksum:
+The raw `.img` file is approximately 6 GB and is therefore not suitable as a normal GitHub Release asset. Publish the compressed `.img.xz` file instead.
 
-```bash
-gh release create v2026.08.05-rock5b \
-  vyos-rock5b-fresh.img.xz \
-  SHA256SUMS \
-  --repo frogro/vyos-build \
-  --target rolling \
-  --title "VyOS Rolling for ROCK 5B - 2026-08-05" \
-  --notes "Unofficial VyOS rolling image for the Radxa ROCK 5B. See the README for flashing and first-boot instructions."
-```
+---
 
-To add or replace an asset on an existing release:
+## Updating from Upstream
 
-```bash
-gh release upload v2026.08.05-rock5b vyos-rock5b-fresh.img.xz SHA256SUMS --repo frogro/vyos-build --clobber
-```
+This repository contains ROCK 5B-specific changes on top of VyOS build sources. Review upstream changes before syncing or rebasing, especially changes involving:
 
-GitHub Release assets must each be smaller than 2 GiB. The raw `vyos-rock5b-fresh.img` is approximately 6 GB and therefore cannot be uploaded as one normal GitHub Release asset. Publish the compressed `.img.xz` file instead. If it is also 2 GiB or larger, it must be split into parts or hosted elsewhere.
-
-## Updating from upstream
-
-This repository contains ROCK 5B-specific changes on top of VyOS build sources. Review upstream changes before syncing or rebasing, especially modifications involving:
-
-- ARM64 image generation;
-- boot and root filesystem assembly;
-- systemd and first-boot services;
-- interface naming;
-- VyOS configuration migration.
+- ARM64 image generation
+- boot and root filesystem assembly
+- systemd and first-boot services
+- interface naming
+- VyOS configuration migration
 
 Always keep a backup branch or tag before a major upstream synchronization.
 
-## License and trademarks
+---
+
+## License and Trademarks
 
 The repository contains or builds software from multiple upstream projects. Their respective licenses remain in effect. Review the license and copyright files included in the repository and generated image.
 
 VyOS is a trademark of Sentrium S.L. Radxa and ROCK 5B are associated with Radxa Computer Co., Ltd. This project is an independent community effort.
+
+---
+
+## ❤️ Support the Project
+
+If this project saved you time or made it easier to run VyOS on the Radxa ROCK 5B, please consider supporting its development.
+
+Contributions help cover hardware, testing, maintenance, and development time.
+
+[![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/FGrootens)
+
+Thank you for your support. ☕
