@@ -97,7 +97,7 @@ for TARGET in \
     fi
 done
 
-grep -q 'rock5b-dhcp-wan-firstboot.timer' \
+grep -q 'Unit=rock5b-dhcp-wan-firstboot.service' \
     "$MERGED_ROOT/etc/systemd/system/rock5b-dhcp-wan-firstboot.timer"
 grep -q 'dhclient@' \
     "$MERGED_ROOT/usr/local/sbin/rock5b-dhcp-wan-firstboot-wrapper.sh"
