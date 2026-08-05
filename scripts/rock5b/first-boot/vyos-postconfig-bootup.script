@@ -1,12 +1,9 @@
 #!/bin/vbash
-# Wird von VyOS nach vollständig angewendeter config.boot ausgeführt.
-
 LOG="/config/rock5b-postconfig.log"
 WORKER="/usr/local/sbin/rock5b-eth0-firstboot.sh"
 MARKER="/config/.rock5b-eth0-firstboot-done"
 
 [ -e "$MARKER" ] && exit 0
-
 printf '%s %s\n' "$(date -Is)" "rock5b-postconfig: starte $WORKER" >> "$LOG"
 
 if /bin/vbash "$WORKER" >> "$LOG" 2>&1; then
