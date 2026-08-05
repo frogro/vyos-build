@@ -97,5 +97,22 @@ if ! save; then
 fi
 
 echo "$(date -Is) rock5b-eth0-firstboot: commit+save erfolgreich, MAC=$MAC" >> "$LOG"
+
+# Sicherheitsnetz: commit/save haben die Konfiguration geschrieben, aber
+# in diesem fruehen Boot-Kontext startet VyOS die eigentlichen operativen
+# Effekte (DHCP-Client, SSH-Neustart) manchmal nicht zuverlaessig selbst.
+# Deshalb hier explizit nachhelfen, statt uns nur auf VyOS' interne
+# Anwendungslogik zu verlassen.
+if ! ip -4 addr show eth0 | grep -q "inet "; then
+    echo "$(date -Is) rock5b-eth0-firstboot: Noch keine IPv4 auf eth0, stosse dhclient manuell an" >> "$LOG"
+    dhclient eth0 >> "$LOG" 2>&1 || true
+fi
+
+if ! ss -ltn 2>/dev/null | grep -q ':22 '; then
+    echo "$(date -Is) rock5b-eth0-firstboot: SSH lauscht noch nicht, starte ssh-Dienst neu" >> "$LOG"
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+fi
+
+echo "$(date -Is) rock5b-eth0-firstboot: Fertig. eth0: $(ip -4 addr show eth0 | grep 'inet ' || echo 'keine IP')" >> "$LOG"
 touch "$MARKER"
 exit
