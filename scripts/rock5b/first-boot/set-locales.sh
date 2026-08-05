@@ -1,15 +1,24 @@
 #!/bin/vbash
-
-# VyOS Standort-, Zeit- und WLAN-Grundeinstellung
-# Als Benutzer "vyos" starten:
+#
+# Configure locale, time zone, DNS, NTP, and wireless regulatory domain on VyOS.
+#
+# Run as the "vyos" user:
 #   chmod +x /home/vyos/set-locales.sh
 #   /home/vyos/set-locales.sh
-# Nicht mit "sudo bash" oder "bash" starten.
+#
+# Do not run with sudo, sudo bash, or bash.
+
+set -o pipefail
 
 if [ "$(id -u)" -eq 0 ]; then
-    echo "Bitte als Benutzer vyos starten, nicht direkt als root."
-    exit 1
+    echo 'Please run this script as the "vyos" user, not as root.'
+    builtin exit 1
 fi
+
+[ -r /opt/vyatta/etc/functions/script-template ] || {
+    echo 'ERROR: VyOS script-template was not found.' >&2
+    builtin exit 1
+}
 
 source /opt/vyatta/etc/functions/script-template
 
@@ -20,101 +29,135 @@ DEFAULT_DNS1="1.1.1.1"
 DEFAULT_DNS2="9.9.9.9"
 DEFAULT_NTP1="162.159.200.1"
 DEFAULT_NTP2="162.159.200.123"
+SYNC_TIMEOUT="${SYNC_TIMEOUT:-90}"
 
 ask_default() {
-    local prompt="$1"
-    local default="$2"
-    local answer=""
+    local prompt="$1" default="$2" answer=""
     read -r -p "$prompt [$default]: " answer
     printf '%s' "${answer:-$default}"
 }
 
 ask_yes_no() {
-    local prompt="$1"
-    local default="${2:-j}"
-    local answer=""
+    local prompt="$1" default="${2:-y}" answer=""
     read -r -p "$prompt [$default]: " answer
     answer="${answer:-$default}"
-
     case "$answer" in
-        j|J|ja|JA|y|Y|yes|YES) return 0 ;;
+        y|Y|yes|Yes|YES) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-echo "=== VyOS Standort-, Zeit- und WLAN-Grundeinstellung ==="
-echo "Achtung: Beim Commit kann der WLAN-AP kurz neu starten und SSH abbrechen."
+fail() {
+    echo "ERROR: $*" >&2
+    builtin exit 1
+}
+
+echo '=== VyOS locale, time, DNS, NTP, and wireless setup ==='
+echo 'Note: committing may briefly restart an active wireless access point.'
 echo
 
-TZ_VALUE="$(ask_default "Zeitzone" "$DEFAULT_TZ")"
-KEYBOARD_VALUE="$(ask_default "Konsolen-Tastaturlayout" "$DEFAULT_KEYBOARD")"
-WIFI_COUNTRY_VALUE="$(ask_default "WLAN-Ländercode" "$DEFAULT_WIFI_COUNTRY")"
-DNS1="$(ask_default "Primärer DNS-Server" "$DEFAULT_DNS1")"
-DNS2="$(ask_default "Sekundärer DNS-Server" "$DEFAULT_DNS2")"
-NTP1="$(ask_default "Primärer NTP-Server" "$DEFAULT_NTP1")"
-NTP2="$(ask_default "Sekundärer NTP-Server" "$DEFAULT_NTP2")"
+TZ_VALUE="$(ask_default 'Time zone' "$DEFAULT_TZ")"
+KEYBOARD_VALUE="$(ask_default 'Console keyboard layout' "$DEFAULT_KEYBOARD")"
+WIFI_COUNTRY_VALUE="$(ask_default 'Wireless regulatory country code' "$DEFAULT_WIFI_COUNTRY")"
+DNS1="$(ask_default 'Primary DNS server' "$DEFAULT_DNS1")"
+DNS2="$(ask_default 'Secondary DNS server' "$DEFAULT_DNS2")"
+NTP1="$(ask_default 'Primary NTP server' "$DEFAULT_NTP1")"
+NTP2="$(ask_default 'Secondary NTP server' "$DEFAULT_NTP2")"
 
 echo
-echo "Zeitzone: $TZ_VALUE"
-echo "Tastatur: $KEYBOARD_VALUE"
-echo "WLAN-Land: $WIFI_COUNTRY_VALUE"
-echo "DNS: $DNS1, $DNS2"
-echo "NTP: $NTP1, $NTP2"
+echo "Time zone:       $TZ_VALUE"
+echo "Keyboard layout: $KEYBOARD_VALUE"
+echo "Wireless country: $WIFI_COUNTRY_VALUE"
+echo "DNS servers:     $DNS1, $DNS2"
+echo "NTP servers:     $NTP1, $NTP2"
 echo
 
-if ! ask_yes_no "Übernehmen?" "j"; then
-    echo "Abgebrochen."
-    exit 0
+if ! ask_yes_no 'Apply these settings?' 'y'; then
+    echo 'Cancelled.'
+    builtin exit 0
 fi
 
-if ! configure; then
-    echo "Konfigurationsmodus konnte nicht gestartet werden."
-    exit 1
+configure || fail 'Could not enter configuration mode.'
+
+CONFIG_FAILED=0
+set system time-zone "$TZ_VALUE" || CONFIG_FAILED=1
+set system option keyboard-layout "$KEYBOARD_VALUE" || CONFIG_FAILED=1
+set system wireless country-code "$WIFI_COUNTRY_VALUE" || CONFIG_FAILED=1
+set system name-server "$DNS1" || CONFIG_FAILED=1
+set system name-server "$DNS2" || CONFIG_FAILED=1
+set service ntp server "$NTP1" || CONFIG_FAILED=1
+set service ntp server "$NTP2" || CONFIG_FAILED=1
+
+if [ "$CONFIG_FAILED" -ne 0 ]; then
+    echo 'ERROR: At least one configuration command failed.' >&2
+    discard
+    builtin exit 1
 fi
 
-set system time-zone "$TZ_VALUE" >/dev/null 2>&1 || true
-set system option keyboard-layout "$KEYBOARD_VALUE" >/dev/null 2>&1 || true
-set system wireless country-code "$WIFI_COUNTRY_VALUE" >/dev/null 2>&1 || true
-set system name-server "$DNS1" >/dev/null 2>&1 || true
-set system name-server "$DNS2" >/dev/null 2>&1 || true
-set service ntp server "$NTP1" >/dev/null 2>&1 || true
-set service ntp server "$NTP2" >/dev/null 2>&1 || true
-
 echo
-echo "=== Vorgesehene Änderungen ==="
+echo '=== Proposed changes ==='
 compare
 echo
 
-if ! ask_yes_no "Commit und Save ausführen? Der AP kann kurz ausfallen." "j"; then
+if ! ask_yes_no 'Commit and save? An active access point may restart briefly.' 'y'; then
     discard
-    exit
+    echo 'Cancelled; no changes were applied.'
+    builtin exit 0
 fi
 
 if ! commit; then
-    echo "Commit fehlgeschlagen; nichts gespeichert."
+    echo 'ERROR: Commit failed; discarding changes.' >&2
     discard
-    exit 1
+    builtin exit 1
 fi
 
 if ! save; then
-    echo "Save fehlgeschlagen."
-    exit 1
+    echo 'ERROR: Save failed.' >&2
+    discard 2>/dev/null || true
+    builtin exit 1
 fi
 
+# End the VyOS configuration session before restarting system services.
 exit
 
 echo
-echo "Konfiguration gespeichert. Starte Chrony neu..."
-sudo systemctl restart chrony
-sleep 5
+echo 'Configuration saved. Restarting Chrony...'
+if ! sudo systemctl restart chrony; then
+    echo 'WARNING: Chrony could not be restarted.' >&2
+fi
+
+sleep 2
 sudo chronyc makestep >/dev/null 2>&1 || true
 
+echo "Waiting up to ${SYNC_TIMEOUT} seconds for NTP synchronization..."
+SYNCED=no
+ELAPSED=0
+while [ "$ELAPSED" -lt "$SYNC_TIMEOUT" ]; do
+    if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]; then
+        SYNCED=yes
+        break
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+done
+
 echo
-echo "=== Zeitstatus ==="
+echo '=== Time status ==='
 date
 timedatectl status | sed -n '1,8p'
+
 echo
-echo "=== NTP-Quellen ==="
+echo '=== Chrony tracking ==='
+chronyc tracking || true
+
+echo
+echo '=== NTP sources ==='
 chronyc sources -v || true
+
 echo
-echo "Fertig."
+if [ "$SYNCED" = yes ]; then
+    echo 'Done: system time is synchronized.'
+else
+    echo "WARNING: NTP synchronization was not confirmed within ${SYNC_TIMEOUT} seconds."
+    echo 'Check again later with: chronyc tracking'
+fi

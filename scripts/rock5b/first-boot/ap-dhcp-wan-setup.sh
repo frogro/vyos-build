@@ -1,10 +1,10 @@
 #!/bin/vbash
-# VyOS WLAN-AP + DHCP + optionales Ethernet-WAN fuer ROCK 5B - Version 7
-# Erkennt alle WLAN-Geraete, laesst einen AP-faehigen Adapter auswaehlen,
-# bindet die VyOS-Konfiguration dauerhaft ueber dessen MAC-Adresse und
-# richtet den lokalen DHCP-Server ein und aktiviert optional Ethernet-WAN mit NAT,
-# aber nur wenn beim Skriptlauf ein Netzwerkkabel mit Link erkannt wird.
-# Prueft/aktiviert ausserdem SSH robust ueber TCP-Port 22/sshd und fragt interaktiv nach SSID, Passwort und WLAN-Laendercode.
+# VyOS wireless AP, DHCP, and optional Ethernet WAN setup for ROCK 5B - Version 7
+# Erkennt alle WLAN-devicee, laesst einen AP-faehigen Adapter auswaehlen,
+# persistently binds the VyOS configuration to the selected MAC address,
+# configures the local DHCP server, and optionally enables Ethernet WAN with NAT,
+# but only when an Ethernet interface with carrier is detected while the script runs.
+# Prueft/activeiert ausserdem SSH robust through TCP-Port 22/sshd und fragt interactive nach SSID, Passwort und Wireless country code.
 
 set -o pipefail
 
@@ -28,61 +28,61 @@ NAT_RULE="${NAT_RULE:-150}"
 
 usage() {
   cat <<USAGE
-Verwendung: sudo $0 [OPTIONEN]
+Usage: sudo $0 [OPTIONS]
 
-Optionen:
+Options:
   --ssid NAME             SSID; unterdrueckt die Rueckfrage
                           (Standard bei leerer Eingabe: $SSID)
   --passphrase PASSWORT   WPA2-Passwort; unterdrueckt die Rueckfrage
                           (8 bis 63 Zeichen; Standard: $PASSPHRASE)
   --address CIDR          AP-Adresse (Standard: $AP_ADDRESS)
-  --country CC            WLAN-Laendercode; unterdrueckt die Rueckfrage
+  --country CC            Wireless country code; unterdrueckt die Rueckfrage
                           (Standard bei leerer Eingabe: $COUNTRY_CODE)
   --interface NAME        VyOS-Interfacename erzwingen
   --dhcp-name NAME        DHCP Shared-Network-Name (Standard: $DHCP_NAME)
   --dhcp-start IP         Erste DHCP-Adresse (Standard: $DHCP_START)
   --dhcp-stop IP          Letzte DHCP-Adresse (Standard: $DHCP_STOP)
   --dns IP                An Clients ausgegebener DNS-Server (Standard: $DHCP_DNS)
-  --wan auto|none|IFACE   Ethernet-WAN: automatisch, aus oder Interface
-                          (Standard: auto; nur bei erkanntem Kabel-Link aktiv)
+  --wan auto|none|IFACE   Ethernet WAN: automatisch, aus oder Interface
+                          (default: auto; enabled only when carrier is detected)
   --nat-rule NUMMER       VyOS-NAT-Regelnummer (Standard: $NAT_RULE)
   -h, --help              Hilfe
 
-Das Skript richtet AP und DHCP immer ein. Bei --wan auto wird zusaetzlich nur
-wenn ein verbundenes Ethernet-Interface erkannt wird, DHCP-Client und NAT
-eingerichtet. Ohne Kabel wird WAN sauber uebersprungen; AP und DHCP bleiben aktiv.
+Das Skript richtet AP und DHCP immer ein. Bei --wan auto will be zusaetzlich nur
+when a connected Ethernet interface is detected, a DHCP client and NAT are
+configured. Without carrier, WAN is skipped cleanly while AP and DHCP remain active.
 USAGE
 }
 
 die() {
-  echo "FEHLER: $*" >&2
+  echo "ERROR: $*" >&2
   builtin exit 1
 }
 
 need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "Benoetigter Befehl fehlt: $1"
+  command -v "$1" >/dev/null 2>&1 || die "Required command is missing: $1"
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --ssid) [ "$#" -ge 2 ] || die "Wert fuer --ssid fehlt"; SSID="$2"; SSID_FROM_CLI=1; shift 2 ;;
-    --passphrase) [ "$#" -ge 2 ] || die "Wert fuer --passphrase fehlt"; PASSPHRASE="$2"; PASSPHRASE_FROM_CLI=1; shift 2 ;;
-    --address) [ "$#" -ge 2 ] || die "Wert fuer --address fehlt"; AP_ADDRESS="$2"; shift 2 ;;
-    --country) [ "$#" -ge 2 ] || die "Wert fuer --country fehlt"; COUNTRY_CODE="$2"; COUNTRY_FROM_CLI=1; shift 2 ;;
-    --interface) [ "$#" -ge 2 ] || die "Wert fuer --interface fehlt"; FORCED_IF="$2"; shift 2 ;;
-    --dhcp-name) [ "$#" -ge 2 ] || die "Wert fuer --dhcp-name fehlt"; DHCP_NAME="$2"; shift 2 ;;
-    --dhcp-start) [ "$#" -ge 2 ] || die "Wert fuer --dhcp-start fehlt"; DHCP_START="$2"; shift 2 ;;
-    --dhcp-stop) [ "$#" -ge 2 ] || die "Wert fuer --dhcp-stop fehlt"; DHCP_STOP="$2"; shift 2 ;;
-    --dns) [ "$#" -ge 2 ] || die "Wert fuer --dns fehlt"; DHCP_DNS="$2"; shift 2 ;;
-    --wan) [ "$#" -ge 2 ] || die "Wert fuer --wan fehlt"; WAN_MODE="$2"; shift 2 ;;
-    --nat-rule) [ "$#" -ge 2 ] || die "Wert fuer --nat-rule fehlt"; NAT_RULE="$2"; shift 2 ;;
+    --ssid) [ "$#" -ge 2 ] || die "Missing value for --ssid is missing"; SSID="$2"; SSID_FROM_CLI=1; shift 2 ;;
+    --passphrase) [ "$#" -ge 2 ] || die "Missing value for --passphrase is missing"; PASSPHRASE="$2"; PASSPHRASE_FROM_CLI=1; shift 2 ;;
+    --address) [ "$#" -ge 2 ] || die "Missing value for --address is missing"; AP_ADDRESS="$2"; shift 2 ;;
+    --country) [ "$#" -ge 2 ] || die "Missing value for --country is missing"; COUNTRY_CODE="$2"; COUNTRY_FROM_CLI=1; shift 2 ;;
+    --interface) [ "$#" -ge 2 ] || die "Missing value for --interface is missing"; FORCED_IF="$2"; shift 2 ;;
+    --dhcp-name) [ "$#" -ge 2 ] || die "Missing value for --dhcp-name is missing"; DHCP_NAME="$2"; shift 2 ;;
+    --dhcp-start) [ "$#" -ge 2 ] || die "Missing value for --dhcp-start is missing"; DHCP_START="$2"; shift 2 ;;
+    --dhcp-stop) [ "$#" -ge 2 ] || die "Missing value for --dhcp-stop is missing"; DHCP_STOP="$2"; shift 2 ;;
+    --dns) [ "$#" -ge 2 ] || die "Missing value for --dns is missing"; DHCP_DNS="$2"; shift 2 ;;
+    --wan) [ "$#" -ge 2 ] || die "Missing value for --wan is missing"; WAN_MODE="$2"; shift 2 ;;
+    --nat-rule) [ "$#" -ge 2 ] || die "Missing value for --nat-rule is missing"; NAT_RULE="$2"; shift 2 ;;
     -h|--help) usage; builtin exit 0 ;;
     *) die "Unbekannte Option: $1" ;;
   esac
 done
 
-[ "$EUID" -eq 0 ] || die "Bitte mit sudo ausfuehren"
-[ -r /opt/vyatta/etc/functions/script-template ] || die "VyOS script-template nicht gefunden"
+[ "$EUID" -eq 0 ] || die "Please run with sudo"
+[ -r /opt/vyatta/etc/functions/script-template ] || die "VyOS script-template not found"
 
 need_cmd iw
 need_cmd ip
@@ -96,26 +96,26 @@ need_cmd python3
 need_cmd find
 
 if [ "$SSID_FROM_CLI" -eq 0 ]; then
-  read -rp "WLAN-SSID [$SSID]: " SSID_INPUT
+  read -rp "Wireless SSID [$SSID]: " SSID_INPUT
   [ -z "$SSID_INPUT" ] || SSID="$SSID_INPUT"
 fi
 
 if [ "$PASSPHRASE_FROM_CLI" -eq 0 ]; then
-  read -rsp "WLAN-Passwort [$PASSPHRASE]: " PASSPHRASE_INPUT
+  read -rsp "Wireless password [$PASSPHRASE]: " PASSPHRASE_INPUT
   echo ""
   [ -z "$PASSPHRASE_INPUT" ] || PASSPHRASE="$PASSPHRASE_INPUT"
 fi
 
-[ -n "$SSID" ] || die "SSID darf nicht leer sein"
+[ -n "$SSID" ] || die "SSID must not be empty"
 case "$AP_ADDRESS" in */*) ;; *) die "--address muss CIDR enthalten" ;; esac
 PASSLEN=${#PASSPHRASE}
 [ "$PASSLEN" -ge 8 ] && [ "$PASSLEN" -le 63 ] || die "WPA2-Passwort muss 8 bis 63 Zeichen lang sein"
 
 if [ "$COUNTRY_FROM_CLI" -eq 0 ]; then
-  read -rp "WLAN-Laendercode [$COUNTRY_CODE]: " COUNTRY_INPUT
+  read -rp "Wireless country code [$COUNTRY_CODE]: " COUNTRY_INPUT
   [ -z "$COUNTRY_INPUT" ] || COUNTRY_CODE="$COUNTRY_INPUT"
 fi
-[[ "$COUNTRY_CODE" =~ ^[A-Za-z]{2}$ ]] || die "Laendercode muss aus genau zwei Buchstaben bestehen (z. B. de)"
+[[ "$COUNTRY_CODE" =~ ^[A-Za-z]{2}$ ]] || die "Country code muss aus genau zwei Buchstaben bestehen (z. B. de)"
 
 COUNTRY_CODE="$(printf '%s' "$COUNTRY_CODE" | tr '[:upper:]' '[:lower:]')"
 REG_COUNTRY="$(printf '%s' "$COUNTRY_CODE" | tr '[:lower:]' '[:upper:]')"
@@ -130,7 +130,7 @@ except ValueError as exc:
     print(exc, file=sys.stderr)
     raise SystemExit(1)
 PY
-)" || die "Ungueltige AP-Adresse: $AP_ADDRESS"
+)" || die "Invalide AP-Adresse: $AP_ADDRESS"
 
 python3 - "$AP_NET" "$AP_GATEWAY" "$DHCP_START" "$DHCP_STOP" "$DHCP_DNS" <<'PY' || exit 1
 import ipaddress, sys
@@ -140,13 +140,13 @@ start = ipaddress.ip_address(sys.argv[3])
 stop = ipaddress.ip_address(sys.argv[4])
 dns = ipaddress.ip_address(sys.argv[5])
 if gw not in net:
-    raise SystemExit(f"FEHLER: Gateway {gw} liegt nicht in {net}")
+    raise SystemExit(f"ERROR: Gateway {gw} is not inside {net}")
 if start not in net or stop not in net:
-    raise SystemExit(f"FEHLER: DHCP-Bereich liegt nicht vollstaendig in {net}")
+    raise SystemExit(f"ERROR: DHCP range is not fully inside {net}")
 if int(start) > int(stop):
-    raise SystemExit("FEHLER: DHCP-Start ist groesser als DHCP-Stop")
+    raise SystemExit("ERROR: DHCP-Start ist groesser als DHCP-Stop")
 if start == gw or stop == gw or int(start) <= int(gw) <= int(stop):
-    raise SystemExit("FEHLER: AP-Gateway darf nicht im DHCP-Bereich liegen")
+    raise SystemExit("ERROR: AP gateway must not be inside the DHCP range")
 PY
 
 iw reg set "$REG_COUNTRY" 2>/dev/null || true
@@ -190,9 +190,9 @@ select_wan_interface() {
     auto) ;;
     *)
       iface="$WAN_MODE"
-      [ -e "/sys/class/net/$iface" ] || die "WAN-Interface $iface existiert nicht"
+      [ -e "/sys/class/net/$iface" ] || die "WAN-Interface $iface does not exist"
       [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || echo 0)" = "1" ] || {
-        echo "HINWEIS: $iface hat keinen Kabel-Link; WAN wird uebersprungen." >&2
+        echo "NOTE: $iface has no carrier; WAN will be skipped." >&2
         printf ''
         return 0
       }
@@ -203,11 +203,11 @@ select_wan_interface() {
 
   if [ -n "$FORCED_WAN_IF" ]; then
     iface="$FORCED_WAN_IF"
-    [ -e "/sys/class/net/$iface" ] || die "WAN_IF=$iface existiert nicht"
+    [ -e "/sys/class/net/$iface" ] || die "WAN_IF=$iface does not exist"
     if [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || echo 0)" = "1" ]; then
       printf '%s' "$iface"
     else
-      echo "HINWEIS: $iface hat keinen Kabel-Link; WAN wird uebersprungen." >&2
+      echo "NOTE: $iface has no carrier; WAN will be skipped." >&2
       printf ''
     fi
     return 0
@@ -225,13 +225,13 @@ select_wan_interface() {
   fi
 
   echo "" >&2
-  echo "Mehrere Ethernet-Ports mit Kabel-Link erkannt:" >&2
+  echo "Multiple Ethernet ports with cable link detected:" >&2
   for i in "${!candidates[@]}"; do
     echo "  $((i+1))) ${candidates[$i]}" >&2
   done
-  read -rp "WAN-Port waehlen: " choice </dev/tty
-  [[ "$choice" =~ ^[0-9]+$ ]] || die "Ungueltige WAN-Auswahl"
-  [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ] || die "Ungueltige WAN-Auswahl"
+  read -rp "Select WAN port: " choice </dev/tty
+  [[ "$choice" =~ ^[0-9]+$ ]] || die "Invalide WAN-Selection"
+  [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ] || die "Invalide WAN-Selection"
   printf '%s' "${candidates[$((choice-1))]}"
 }
 
@@ -243,7 +243,7 @@ phy_driver() {
   if [ -z "$driver" ] && [ -e "$phydir/device/driver" ]; then
     driver="$(basename "$(readlink -f "$phydir/device/driver")")"
   fi
-  [ -n "$driver" ] || driver="unbekannt"
+  [ -n "$driver" ] || driver="unknown"
   printf '%s' "$driver"
 }
 
@@ -330,7 +330,7 @@ for phydir in /sys/class/ieee80211/phy*; do
   driver="$(phy_driver "$phydir" "$iface")"
   bus="$(phy_bus "$(readlink -f "$phydir/device" 2>/dev/null || true)")"
   info="$(iw phy "$phy" info 2>/dev/null || true)"
-  summary="kein AP-Modus"
+  summary="no AP mode"
 
   if [ -n "$info" ] && phy_has_ap "$info"; then
     ch2=""; ch5=""
@@ -343,7 +343,7 @@ for phydir in /sys/class/ieee80211/phy*; do
     summary=""
     [ -n "$ch2" ] && summary="${summary}2.4GHz "
     [ -n "$ch5" ] && summary="${summary}5GHz "
-    [ -n "$summary" ] || summary="keine nutzbaren AP-Kanaele"
+    [ -n "$summary" ] || summary="none nutzbaren AP-Kanaele"
   fi
 
   PHYS+=("$phy")
@@ -355,10 +355,10 @@ for phydir in /sys/class/ieee80211/phy*; do
   SUMMARIES+=("$summary")
 done
 
-[ "${#PHYS[@]}" -gt 0 ] || die "Kein WLAN-PHY gefunden"
+[ "${#PHYS[@]}" -gt 0 ] || die "No wireless PHY found"
 
 echo ""
-printf '%-4s %-8s %-8s %-14s %-19s %-10s %s\n' Nr PHY Bus Treiber MAC Interface 'AP-Baender'
+printf '%-4s %-8s %-8s %-14s %-19s %-10s %s\n' Nr PHY Bus driver MAC Interface 'AP bands'
 for i in "${!PHYS[@]}"; do
   printf '%-4s %-8s %-8s %-14s %-19s %-10s %s\n' \
     "$((i+1))" "${PHYS[$i]}" "${BUSES[$i]}" "${DRIVERS[$i]}" \
@@ -366,19 +366,19 @@ for i in "${!PHYS[@]}"; do
   [[ "${SUMMARIES[$i]}" == *GHz* ]] && SELECTABLE+=("$i")
 done
 
-[ "${#SELECTABLE[@]}" -gt 0 ] || die "Kein WLAN-Geraet mit nutzbarem AP-Modus gefunden"
+[ "${#SELECTABLE[@]}" -gt 0 ] || die "No wireless device with usable AP mode found"
 
 echo ""
-echo "AP-Geraet waehlen:"
+echo "Select AP device:"
 for i in "${SELECTABLE[@]}"; do
   echo "  $((i+1))) ${PHYS[$i]}  ${BUSES[$i]}  ${DRIVERS[$i]}  ${MACS[$i]}  Interface ${IFACES[$i]}  ${SUMMARIES[$i]}"
 done
-read -rp "Auswahl: " CHOICE
-[[ "$CHOICE" =~ ^[0-9]+$ ]] || die "Ungueltige Auswahl"
+read -rp "Selection: " CHOICE
+[[ "$CHOICE" =~ ^[0-9]+$ ]] || die "Invalide Selection"
 IDX=$((CHOICE-1))
 valid=0
 for i in "${SELECTABLE[@]}"; do [ "$i" -eq "$IDX" ] && valid=1; done
-[ "$valid" -eq 1 ] || die "Geraet ist nicht auswaehlbar"
+[ "$valid" -eq 1 ] || die "Device is not selectable"
 
 PHY="${PHYS[$IDX]}"
 MAC="${MACS[$IDX]}"
@@ -430,22 +430,22 @@ if [ -n "$CH5" ]; then
   CHANNELS+=("$CH5"); DEFAULTS+=("$(pick_default_channel "$CH5" 36)")
 fi
 
-[ "${#LABELS[@]}" -gt 0 ] || die "Keine AP-Option verfuegbar"
+[ "${#LABELS[@]}" -gt 0 ] || die "No AP-Option verfuegbar"
 echo ""
-echo "Band und Modus waehlen:"
+echo "Select band and mode:"
 for i in "${!LABELS[@]}"; do echo "  $((i+1))) ${LABELS[$i]}"; done
-read -rp "Auswahl: " BCH
-[[ "$BCH" =~ ^[0-9]+$ ]] || die "Ungueltige Auswahl"
+read -rp "Selection: " BCH
+[[ "$BCH" =~ ^[0-9]+$ ]] || die "Invalide Selection"
 BIDX=$((BCH-1))
-[ -n "${LABELS[$BIDX]:-}" ] || die "Ungueltige Auswahl"
+[ -n "${LABELS[$BIDX]:-}" ] || die "Invalide Selection"
 WLAN_MODE="${MODES[$BIDX]}"
 CHANNEL_LIST="${CHANNELS[$BIDX]}"
 CHANNEL="${DEFAULTS[$BIDX]}"
-echo "Nutzbare Kanaele: $CHANNEL_LIST"
-read -rp "Kanal [$CHANNEL]: " CH_INPUT
+echo "Usable channels: $CHANNEL_LIST"
+read -rp "Channel [$CHANNEL]: " CH_INPUT
 if [ -n "$CH_INPUT" ]; then
-  [[ "$CH_INPUT" =~ ^[0-9]+$ ]] || die "Kanal muss numerisch sein"
-  contains_channel "$CHANNEL_LIST" "$CH_INPUT" || die "Kanal $CH_INPUT ist nicht nutzbar"
+  [[ "$CH_INPUT" =~ ^[0-9]+$ ]] || die "Channel must be numeric"
+  contains_channel "$CHANNEL_LIST" "$CH_INPUT" || die "Channel $CH_INPUT is not usable"
   CHANNEL="$CH_INPUT"
 fi
 
@@ -454,7 +454,7 @@ if [ -n "$FORCED_IF" ]; then
 elif [ "$EXISTING_IF" != "-" ]; then
   VYOS_IF="$EXISTING_IF"
 else
-  VYOS_IF="$(next_free_wlan)" || die "Kein freier wlan-Interfacename gefunden"
+  VYOS_IF="$(next_free_wlan)" || die "No free wlan interface name found"
 fi
 
 OLD_AP_IF=""
@@ -468,33 +468,33 @@ rm -f "$OLD_UDEV_RULE"
 command -v udevadm >/dev/null 2>&1 && udevadm control --reload-rules 2>/dev/null || true
 
 echo ""
-echo "Ausgewaehlt: $PHY / $DRIVER / $BUS / MAC $MAC"
+echo "Selected: $PHY / $DRIVER / $BUS / MAC $MAC"
 echo "VyOS-Interface: $VYOS_IF"
-echo "AP: SSID '$SSID', Modus $WLAN_MODE, Kanal $CHANNEL, Adresse $AP_ADDRESS, Land $REG_COUNTRY"
+echo "AP: SSID '$SSID', mode $WLAN_MODE, channel $CHANNEL, address $AP_ADDRESS, country $REG_COUNTRY"
 echo "DHCP: $DHCP_START bis $DHCP_STOP, Gateway $AP_GATEWAY, Netz $AP_NET"
 WAN_IF_SELECTED="$(select_wan_interface)"
 if [ -n "$WAN_IF_SELECTED" ]; then
-  echo "Ethernet-WAN: $WAN_IF_SELECTED (Kabel-Link erkannt; DHCP-Client + NAT werden eingerichtet)"
+  echo "Ethernet WAN: $WAN_IF_SELECTED (carrier detected; DHCP client and NAT will be configured)"
 else
-  echo "Ethernet-WAN: kein Kabel-Link erkannt oder deaktiviert; WAN wird ohne Fehler uebersprungen."
+  echo "Ethernet WAN: no carrier detected or WAN disabled; skipping WAN without error."
 fi
 if [ -n "$OLD_AP_MAC" ] && [ "$OLD_AP_MAC" != "$MAC" ]; then
-  echo "Vorheriger AP-Adapter wird ersetzt: $OLD_AP_MAC -> $MAC"
+  echo "Vorheriger AP-Adapter will be ersetzt: $OLD_AP_MAC -> $MAC"
 fi
-echo "Wende AP, DHCP, SSH und optional Ethernet-WAN in getrennten sicheren Commits an ..."
+echo "Applying AP, DHCP, SSH, and optional Ethernet WAN in separate safe commits ..."
 
 SSH_WAS_ACTIVE=0
 if ssh_is_running; then
   SSH_WAS_ACTIVE=1
-  echo "SSH: Server lauscht bereits auf TCP-Port 22; die VyOS-Konfiguration wird dauerhaft sichergestellt."
+  echo "SSH: the server is already listening on TCP port 22; the VyOS configuration will be persisted."
 else
-  echo "SSH: Kein laufender SSH-Server erkannt; SSH wird in der VyOS-Konfiguration aktiviert."
+  echo "SSH: no running SSH server detected; SSH will be enabled in the VyOS configuration."
 fi
 
 source /opt/vyatta/etc/functions/script-template
 configure
 
-echo "[1/2] Alte WLAN-Konfiguration vollstaendig bereinigen ..."
+echo "[1/2] Removing all previous wireless configuration ..."
 for N in $(seq 0 31); do
   delete interfaces wireless "wlan$N" 2>/dev/null || true
 done
@@ -511,16 +511,16 @@ set interfaces wireless "$VYOS_IF" security wpa mode 'wpa2'
 set interfaces wireless "$VYOS_IF" security wpa cipher 'CCMP'
 set interfaces wireless "$VYOS_IF" security wpa passphrase "$PASSPHRASE"
 
-echo "[1/2] Commit AP ..."
+echo "[1/2] Committing AP configuration ..."
 if ! commit; then
-  echo "FEHLER: AP-Commit fehlgeschlagen. Aenderungen werden verworfen." >&2
+  echo "ERROR: AP commit failed. Changes will be discarded." >&2
   discard
   builtin exit 1
 fi
 save
-echo "[1/2] AP gespeichert."
+echo "[1/2] AP saved."
 
-echo "[2/2] DHCP konfigurieren ..."
+echo "[2/2] Configuring DHCP ..."
 delete service dhcp-server shared-network-name "$DHCP_NAME" 2>/dev/null || true
 set service dhcp-server shared-network-name "$DHCP_NAME" authoritative
 set service dhcp-server shared-network-name "$DHCP_NAME" subnet "$AP_NET" subnet-id '1'
@@ -529,18 +529,18 @@ set service dhcp-server shared-network-name "$DHCP_NAME" subnet "$AP_NET" option
 set service dhcp-server shared-network-name "$DHCP_NAME" subnet "$AP_NET" range 0 start "$DHCP_START"
 set service dhcp-server shared-network-name "$DHCP_NAME" subnet "$AP_NET" range 0 stop "$DHCP_STOP"
 
-echo "[2/2] Commit DHCP ..."
+echo "[2/2] Committing DHCP configuration ..."
 if ! commit; then
-  echo "FEHLER: DHCP-Commit fehlgeschlagen. Der AP ist bereits gespeichert; nur die DHCP-Aenderungen werden verworfen." >&2
+  echo "ERROR: DHCP-Commit failed. The AP is already saved; only DHCP changes will be discarded." >&2
   discard
   builtin exit 1
 fi
 save
-echo "[2/2] DHCP gespeichert."
+echo "[2/2] DHCP saved."
 
 WAN_CONFIGURED=0
 if [ -n "$WAN_IF_SELECTED" ]; then
-  echo "[3/3] Ethernet-WAN $WAN_IF_SELECTED konfigurieren ..."
+  echo "[3/3] Ethernet WAN $WAN_IF_SELECTED configuring ..."
   set interfaces ethernet "$WAN_IF_SELECTED" address 'dhcp'
   delete nat source rule "$NAT_RULE" 2>/dev/null || true
   set nat source rule "$NAT_RULE" description 'PHOTOBOOTH-AP-to-ETHERNET-WAN'
@@ -548,17 +548,17 @@ if [ -n "$WAN_IF_SELECTED" ]; then
   set nat source rule "$NAT_RULE" source address "$AP_NET"
   set nat source rule "$NAT_RULE" translation address 'masquerade'
 
-  echo "[3/3] Commit Ethernet-WAN/NAT ..."
+  echo "[3/3] Committing Ethernet WAN/NAT ..."
   if ! commit; then
-    echo "WARNUNG: WAN/NAT-Commit fehlgeschlagen. AP und DHCP bleiben gespeichert." >&2
+    echo "WARNING: WAN/NAT commit failed. AP and DHCP remain saved." >&2
     discard
   else
     save
     WAN_CONFIGURED=1
-    echo "[3/3] Ethernet-WAN/NAT gespeichert."
+    echo "[3/3] Ethernet WAN/NAT saved."
   fi
 else
-  echo "[3/3] Kein verbundenes Ethernet-WAN: Schritt uebersprungen."
+  echo "[3/3] No verbundenes Ethernet WAN: Schritt throughsprungen."
 fi
 
 cat > "$AP_IF_CACHE" <<CACHE
@@ -594,43 +594,43 @@ done
 
 echo ""
 if [ "$READY_AP" -eq 1 ]; then
-  echo "PASS: AP '$SSID' ist auf $VYOS_IF aktiv (${AP_GATEWAY}/${AP_PREFIX}, Kanal $CHANNEL, Modus $WLAN_MODE)."
+  echo "PASS: AP '$SSID' is active on $VYOS_IF (${AP_GATEWAY}/${AP_PREFIX}, channel $CHANNEL, mode $WLAN_MODE)."
 else
-  echo "WARNUNG: AP wurde gespeichert, war nach 45 Sekunden aber noch nicht vollstaendig aktiv."
-  echo "Pruefen: ip -br addr show $VYOS_IF"
-  echo "Pruefen: systemctl status hostapd@${VYOS_IF}.service --no-pager -l"
+  echo "WARNING: The AP was saved but was not fully active after 45 seconds."
+  echo "Check: ip -br addr show $VYOS_IF"
+  echo "Check: systemctl status hostapd@${VYOS_IF}.service --no-pager -l"
 fi
 
 if [ "$READY_DHCP" -eq 1 ]; then
-  echo "PASS: DHCP lauscht auf UDP-Port 67; Bereich $DHCP_START-$DHCP_STOP."
+  echo "PASS: DHCP is listening on UDP port 67; range $DHCP_START-$DHCP_STOP."
 else
-  echo "WARNUNG: DHCP wurde gespeichert, aber UDP-Port 67 lauschte innerhalb von 45 Sekunden noch nicht."
-  echo "Pruefen: sudo ss -lunp | grep ':67'"
-  echo "Pruefen: sudo systemctl list-units --type=service | grep -Ei 'dhcp|kea'"
+  echo "WARNING: DHCP was saved, but UDP port 67 was not listening within 45 seconds."
+  echo "Check: sudo ss -lunp | grep ':67'"
+  echo "Check: sudo systemctl list-units --type=service | grep -Ei 'dhcp|kea'"
 fi
 
 if [ -n "$WAN_IF_SELECTED" ]; then
   if [ "$WAN_CONFIGURED" -eq 1 ]; then
-    echo "PASS: Optionales Ethernet-WAN ist auf $WAN_IF_SELECTED als DHCP-Client mit NAT-Regel $NAT_RULE gespeichert."
-    echo "Hinweis: Eine IPv4-Adresse/Default-Route erscheint erst, wenn der angeschlossene Router DHCP anbietet."
+    echo "PASS: Optional Ethernet WAN is configured on $WAN_IF_SELECTED as a DHCP client with NAT rule $NAT_RULE saved."
+    echo "Note: An IPv4 address/default route appears only when the connected router provides DHCP."
   else
-    echo "WARNUNG: Ethernet-Link war vorhanden, WAN/NAT konnte aber nicht gespeichert werden. AP und DHCP funktionieren weiterhin."
+    echo "WARNING: Ethernet carrier was present, but WAN/NAT could not be saved. AP and DHCP remain operational."
   fi
 else
-  echo "INFO: Kein Ethernet-Kabel-Link beim Skriptlauf. AP und DHCP wurden trotzdem vollstaendig eingerichtet."
-  echo "Fuer spaeteres Ethernet-WAN Kabel anschliessen und das Skript erneut ausfuehren."
+  echo "INFO: No Ethernet carrier was present while the script ran. AP and DHCP were still configured completely."
+  echo "To enable Ethernet WAN later, connect a cable and run the script again."
 fi
 
 if ssh_is_running; then
-  echo "PASS: SSH-Server laeuft und lauscht auf TCP-Port 22."
+  echo "PASS: SSH server is running and listening on TCP port 22."
 else
-  echo "WARNUNG: 'service ssh' ist gespeichert, aber auf TCP-Port 22 wurde kein SSH-Server erkannt."
-  echo "Pruefen: show configuration commands | match 'service ssh'"
-  echo "Pruefen: sudo ss -ltnp | grep ':22'"
-  echo "Pruefen: pgrep -a sshd"
+  echo "WARNING: 'service ssh' is saved, but no SSH server was detected on TCP port 22."
+  echo "Check: show configuration commands | match 'service ssh'"
+  echo "Check: sudo ss -ltnp | grep ':22'"
+  echo "Check: pgrep -a sshd"
 fi
 
-echo "WLAN-Laendercode: $REG_COUNTRY"
-echo "Dauerhafte Adapterbindung: $VYOS_IF -> $MAC"
+echo "Wireless country code: $REG_COUNTRY"
+echo "Persistent adapter binding: $VYOS_IF -> $MAC"
 echo "Cache: $AP_IF_CACHE"
 builtin exit 0

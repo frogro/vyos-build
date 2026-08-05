@@ -14,7 +14,7 @@ log() {
 }
 
 fail() {
-    log "FEHLER: $*"
+    log "ERROR: $*"
     builtin exit 1
 }
 
@@ -50,26 +50,26 @@ if [ "$WIRED_IF" = "auto" ]; then
     WIRED_IF="$(detect_wired_interface || true)"
 fi
 
-[ -n "$WIRED_IF" ] || fail "Keine kabelgebundene Ethernet-Schnittstelle erkannt"
-[ -e "/sys/class/net/$WIRED_IF" ] || fail "Interface $WIRED_IF existiert nicht"
+[ -n "$WIRED_IF" ] || fail "No wired Ethernet interface detected"
+[ -e "/sys/class/net/$WIRED_IF" ] || fail "Interface $WIRED_IF does not exist"
 
 MAC="$(tr '[:upper:]' '[:lower:]' < "/sys/class/net/$WIRED_IF/address" 2>/dev/null)"
 printf '%s\n' "$MAC" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' ||
-    fail "Ungueltige MAC-Adresse fuer $WIRED_IF: ${MAC:-leer}"
+    fail "Invalide MAC-Adresse fuer $WIRED_IF: ${MAC:-leer}"
 
 case "$ROUTE_DISTANCE" in
-    ''|*[!0-9]*) fail "Ungueltige Routendistanz: $ROUTE_DISTANCE" ;;
+    ''|*[!0-9]*) fail "Invalide Routendistanz: $ROUTE_DISTANCE" ;;
 esac
 
 printf '%s\n' "$WIRED_IF" > "$IFACE_FILE"
 chmod 600 "$IFACE_FILE"
 
-log "Erkannt: Interface=$WIRED_IF MAC=$MAC DHCP-Distanz=$ROUTE_DISTANCE"
+log "Detected: interface=$WIRED_IF MAC=$MAC DHCP route distance=$ROUTE_DISTANCE"
 
 sudo /sbin/ip link set "$WIRED_IF" up 2>/dev/null || true
 
 [ -r /opt/vyatta/etc/functions/script-template ] ||
-    fail "VyOS script-template fehlt"
+    fail "VyOS script-template is missing"
 
 source /opt/vyatta/etc/functions/script-template
 configure
@@ -85,18 +85,18 @@ CHANGES="$(compare 2>/dev/null || true)"
 if [ -n "$CHANGES" ]; then
     if ! commit; then
         discard
-        fail "commit fehlgeschlagen"
+        fail "commit failed"
     fi
 
     if ! save; then
         discard
-        fail "save fehlgeschlagen"
+        fail "save failed"
     fi
 
-    log "VyOS-Konfiguration gespeichert"
+    log "VyOS configuration saved"
 else
     discard 2>/dev/null || true
-    log "Gewuenschte VyOS-Konfiguration war bereits vorhanden"
+    log "The requested VyOS configuration was already present"
 fi
 
 log "Konfigurationsphase abgeschlossen"
