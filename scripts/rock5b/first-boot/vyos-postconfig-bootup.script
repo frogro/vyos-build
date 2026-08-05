@@ -1,27 +1,15 @@
 #!/bin/sh
-# VyOS ruft diesen Hook nach dem Anwenden von config.boot auf.
-# Der Worker wird absichtlich NICHT direkt hier gestartet:
-# Der Hook läuft noch im Kontext von vyos-router und kann dessen
-# Konfigurationssitzung erben. systemd-run startet den Worker später
-# in einem sauberen, getrennten Prozess.
-
 LOG="/config/rock5b-postconfig.log"
-MARKER="/config/.rock5b-eth0-firstboot-done"
-UNIT="rock5b-eth0-firstboot"
-WORKER="/usr/local/sbin/rock5b-eth0-firstboot.sh"
-
+MARKER="/config/.dhcp-wan-ssh-firstboot-done"
+UNIT="rock5b-dhcp-wan-ssh-firstboot"
+SCRIPT="/home/vyos/dhcp-wan-ssh-setup.sh"
 [ -e "$MARKER" ] && exit 0
-
-printf '%s %s\n' "$(date -Is)"   "rock5b-postconfig: plane $WORKER mit 30 Sekunden Verzoegerung" >> "$LOG"
-
-# Alte fehlgeschlagene transiente Unit entfernen, falls vorhanden.
-systemctl reset-failed "${UNIT}.service" "${UNIT}.timer" >/dev/null 2>&1 || true
-
-if /usr/bin/systemd-run     --unit="$UNIT"     --on-active=30s     --property=Type=oneshot     --property=TimeoutStartSec=300     --property=StandardOutput=journal     --property=StandardError=journal     /bin/vbash "$WORKER" >> "$LOG" 2>&1; then
-    printf '%s %s\n' "$(date -Is)"       "rock5b-postconfig: transiente Unit ${UNIT}.service eingeplant" >> "$LOG"
-    exit 0
+printf '%s %s\n' "$(date -Is)" "rock5b-postconfig: plane $SCRIPT als Benutzer vyos mit 30 Sekunden Verzögerung" >> "$LOG"
+/bin/systemctl reset-failed "${UNIT}.service" "${UNIT}.timer" >/dev/null 2>&1 || true
+if /usr/bin/systemd-run --unit="$UNIT" --on-active=30s --property=Type=oneshot --property=TimeoutStartSec=600 --property=StandardOutput=journal --property=StandardError=journal /usr/sbin/runuser -u vyos -- /bin/vbash -lc "$SCRIPT --auto" >> "$LOG" 2>&1; then
+  printf '%s %s\n' "$(date -Is)" "rock5b-postconfig: ${UNIT}.service eingeplant" >> "$LOG"
+  exit 0
 fi
-
 RC=$?
-printf '%s %s\n' "$(date -Is)"   "rock5b-postconfig: FEHLER beim Einplanen, rc=$RC" >> "$LOG"
+printf '%s %s\n' "$(date -Is)" "rock5b-postconfig: FEHLER beim Einplanen, rc=$RC" >> "$LOG"
 exit "$RC"
