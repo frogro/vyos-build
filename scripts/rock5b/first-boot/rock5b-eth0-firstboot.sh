@@ -1,15 +1,15 @@
 #!/bin/vbash
-# Rock 5B: eth0 + DHCP + SSH beim ersten Boot zuverlässig einrichten.
-# Wird durch rock5b-eth0-firstboot.service gestartet.
+# Rock 5B: eth0 per DHCP und SSH einmalig nach vollständig angewendeter
+# VyOS-Bootkonfiguration einrichten.
+#
+# Aufruf erfolgt durch:
+# /config/scripts/vyos-postconfig-bootup.script
 
 set -o pipefail
 
 MARKER="/config/.rock5b-eth0-firstboot-done"
 LOG="/config/rock5b-eth0-firstboot.log"
-IFACE="eth0"
-WAIT_IFACE=60
-WAIT_RUNTIME=90
-WAIT_NETWORK=60
+IFACE="${IFACE:-eth0}"
 
 log() {
     printf '%s %s\n' "$(date -Is)" "rock5b-eth0-firstboot: $*" | tee -a "$LOG"
@@ -22,55 +22,43 @@ fail() {
 
 [ -e "$MARKER" ] && exit 0
 
-log "Start"
+# VyOS-Konfigurationsbefehle benötigen die Gruppe vyattacfg.
+if [ "$(id -gn)" != "vyattacfg" ]; then
+    exec sg vyattacfg -c "/bin/vbash $(readlink -f "$0")"
+fi
 
-# eth0 muss durch net.ifnames=0 bereits existieren.
+log "Start nach VyOS-Postconfig"
+
 MAC=""
-for _ in $(seq 1 "$WAIT_IFACE"); do
+for _ in $(seq 1 60); do
     if [ -r "/sys/class/net/${IFACE}/address" ]; then
         MAC="$(tr '[:upper:]' '[:lower:]' < "/sys/class/net/${IFACE}/address")"
-        case "$MAC" in
-            ""|00:00:00:00:00:00) ;;
-            *) break ;;
-        esac
+        if printf '%s\n' "$MAC" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' \
+           && [ "$MAC" != "00:00:00:00:00:00" ]; then
+            break
+        fi
     fi
     sleep 1
 done
 
-printf '%s\n' "$MAC" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || fail "Keine gültige MAC für ${IFACE} erkannt"
+printf '%s\n' "$MAC" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' \
+    || fail "Keine gültige MAC-Adresse für ${IFACE}"
 log "Erkannt: ${IFACE}, MAC ${MAC}"
 
-# Rock5B-Merge-Workaround: Interface vor der VyOS-Konfiguration administrativ hochsetzen.
-ip link set "$IFACE" up 2>/dev/null || true
+sudo /sbin/ip link set "$IFACE" up 2>/dev/null || true
 
-# Auf eine benutzbare VyOS-Konfigurationslaufzeit warten.
-RUNTIME_OK=0
-for _ in $(seq 1 "$WAIT_RUNTIME"); do
-    if systemctl is-active --quiet vyos-router.service 2>/dev/null \
-       && [ -r /opt/vyatta/etc/functions/script-template ] \
-       && [ -d /run/vyatta ]; then
-        RUNTIME_OK=1
-        break
-    fi
-    sleep 1
-done
-[ "$RUNTIME_OK" -eq 1 ] || fail "VyOS-Konfigurationslaufzeit wurde nicht rechtzeitig bereit"
+[ -r /opt/vyatta/etc/functions/script-template ] \
+    || fail "VyOS script-template fehlt"
 
-# Commit/Save in einer Subshell, damit das Beenden der Config-Session
-# nicht das restliche First-Boot-Skript beendet.
-(
+if ! (
     source /opt/vyatta/etc/functions/script-template
     configure
 
-    # Vorhandenen unvollständigen Block sauber ergänzen/ersetzen.
     set interfaces ethernet "$IFACE" hw-id "$MAC"
     set interfaces ethernet "$IFACE" description 'WAN-LAN-DHCP'
     set interfaces ethernet "$IFACE" address 'dhcp'
     set interfaces ethernet "$IFACE" dhcp-options default-route-distance '1'
-
-    # SSH dauerhaft in der VyOS-Konfiguration aktivieren.
     set service ssh
-    set service ssh port '22'
 
     if ! commit; then
         discard
@@ -81,41 +69,48 @@ done
         discard
         exit 1
     fi
-) || fail "VyOS commit/save fehlgeschlagen"
-
-log "VyOS-Konfiguration gespeichert"
-
-# Der Commit schreibt die SSH-Konfiguration, startet den Dienst in diesem
-# gemergten Image aber nicht immer beim ersten Boot. Deshalb gezielt starten.
-SSH_UNIT=""
-for unit in ssh@default.service ssh.service sshd.service; do
-    if systemctl cat "$unit" >/dev/null 2>&1; then
-        SSH_UNIT="$unit"
-        break
-    fi
-done
-
-if [ -n "$SSH_UNIT" ]; then
-    systemctl start "$SSH_UNIT" || fail "SSH-Dienst ${SSH_UNIT} konnte nicht gestartet werden"
-    log "SSH-Dienst gestartet: ${SSH_UNIT}"
-else
-    fail "Kein passender SSH-systemd-Dienst gefunden"
+); then
+    fail "VyOS commit/save fehlgeschlagen"
 fi
 
-# Auf DHCP-Adresse und tatsächlich offenen SSH-Port warten.
+log "Konfiguration gespeichert"
+
 IP_OK=0
-SSH_OK=0
-for _ in $(seq 1 "$WAIT_NETWORK"); do
-    ip -4 -br address show dev "$IFACE" 2>/dev/null | grep -qE "${IFACE}[[:space:]]+UP[[:space:]]+[^[:space:]]*[0-9]+\." && IP_OK=1
-    ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq '(^|:|\])22$' && SSH_OK=1
-    [ "$IP_OK" -eq 1 ] && [ "$SSH_OK" -eq 1 ] && break
-    sleep 1
+for _ in $(seq 1 60); do
+    if ip -4 -br address show dev "$IFACE" 2>/dev/null \
+        | grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/'; then
+        IP_OK=1
+        break
+    fi
+    sleep 2
 done
 
 [ "$IP_OK" -eq 1 ] || fail "${IFACE} erhielt keine IPv4-Adresse"
+IPV4="$(ip -4 -br address show dev "$IFACE" | awk '{print $3; exit}')"
+
+# Commit sollte SSH starten. Nur wenn Port 22 noch nicht lauscht,
+# vorhandene Unit starten, niemals neu starten.
+if ! ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq '(^|:|\])22$'; then
+    for UNIT in ssh@default.service ssh.service sshd.service; do
+        if systemctl cat "$UNIT" >/dev/null 2>&1; then
+            sudo systemctl start "$UNIT" 2>>"$LOG" || true
+            break
+        fi
+    done
+fi
+
+SSH_OK=0
+for _ in $(seq 1 30); do
+    if ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq '(^|:|\])22$'; then
+        SSH_OK=1
+        break
+    fi
+    sleep 1
+done
+
 [ "$SSH_OK" -eq 1 ] || fail "SSH lauscht nicht auf TCP-Port 22"
 
 touch "$MARKER"
 chmod 600 "$MARKER"
-log "FERTIG: ${IFACE} mit DHCP aktiv und SSH auf Port 22 erreichbar"
+log "FERTIG: ${IFACE}=${IPV4}, SSH Port 22 aktiv"
 exit 0

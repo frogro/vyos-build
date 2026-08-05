@@ -1,60 +1,19 @@
 #!/bin/vbash
-# Wird von VyOS automatisch nach jedem Boot ausgefuehrt, NACHDEM die
-# normale Konfiguration bereits angewendet wurde (offizieller VyOS-Hook,
-# siehe https://docs.vyos.io/en/latest/automation/command-scripting.html).
-#
-# Zweck: eth0 einmalig, beim allerersten Boot, dynamisch mit der
-# tatsaechlich erkannten MAC-Adresse dieses spezifischen Boards binden.
-# Das ist noetig, weil VyOS' Interface-Migration eth0 sonst beim ersten
-# Boot nicht zuverlaessig zuordnen kann und den kompletten
-# "interfaces ethernet eth0"-Block aus der Konfiguration entfernt.
-#
-# Board-unabhaengig: Diese Datei ist fuer JEDES Rock5B-Board identisch,
-# die MAC wird zur Laufzeit ermittelt statt fest einprogrammiert zu sein.
+# Wird von VyOS nach vollständig angewendeter config.boot ausgeführt.
 
+LOG="/config/rock5b-postconfig.log"
+WORKER="/usr/local/sbin/rock5b-eth0-firstboot.sh"
 MARKER="/config/.rock5b-eth0-firstboot-done"
-LOG="/config/rock5b-eth0-firstboot.log"
 
-# Nur beim allerersten Boot ausfuehren, danach nie wieder.
 [ -e "$MARKER" ] && exit 0
 
-echo "$(date -Is) rock5b-eth0-firstboot: Start" >> "$LOG"
+printf '%s %s\n' "$(date -Is)" "rock5b-postconfig: starte $WORKER" >> "$LOG"
 
-# Auf die Netzwerk-Erkennung warten, MAC von eth0 ermitteln.
-MAC=""
-for i in $(seq 1 30); do
-    if [ -e /sys/class/net/eth0/address ]; then
-        MAC="$(cat /sys/class/net/eth0/address)"
-        [ -n "$MAC" ] && [ "$MAC" != "00:00:00:00:00:00" ] && break
-    fi
-    sleep 1
-done
-
-if [ -z "$MAC" ] || [ "$MAC" = "00:00:00:00:00:00" ]; then
-    echo "$(date -Is) rock5b-eth0-firstboot: Konnte MAC von eth0 nicht ermitteln, breche ab." >> "$LOG"
-    exit 1
+if /bin/vbash "$WORKER" >> "$LOG" 2>&1; then
+    printf '%s %s\n' "$(date -Is)" "rock5b-postconfig: erfolgreich" >> "$LOG"
+    exit 0
 fi
 
-echo "$(date -Is) rock5b-eth0-firstboot: Erkannte MAC $MAC" >> "$LOG"
-
-source /opt/vyatta/etc/functions/script-template
-configure
-
-set interfaces ethernet eth0 hw-id "$MAC"
-set interfaces ethernet eth0 description 'WAN-LAN-DHCP'
-set interfaces ethernet eth0 address 'dhcp'
-set interfaces ethernet eth0 dhcp-options default-route-distance '1'
-set service ssh port '22'
-
-if commit; then
-    if save; then
-        echo "$(date -Is) rock5b-eth0-firstboot: commit+save erfolgreich, MAC=$MAC" >> "$LOG"
-        touch "$MARKER"
-    else
-        echo "$(date -Is) rock5b-eth0-firstboot: save fehlgeschlagen" >> "$LOG"
-    fi
-else
-    echo "$(date -Is) rock5b-eth0-firstboot: commit fehlgeschlagen" >> "$LOG"
-fi
-
-exit
+RC=$?
+printf '%s %s\n' "$(date -Is)" "rock5b-postconfig: FEHLER rc=$RC" >> "$LOG"
+exit "$RC"
