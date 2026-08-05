@@ -93,24 +93,26 @@ chmod +x "${MERGED_ROOT}/usr/local/sbin/rock5b-eth0-firstboot.sh"
 cat > "${MERGED_ROOT}/etc/systemd/system/rock5b-eth0-firstboot.service" << 'UNIT2'
 [Unit]
 Description=Rock5B eth0 hw-id dynamisch beim ersten Boot binden
-After=vyos-router.service eth0-force-up.service nss-lookup.target dbus.service polkit.service
+# Laeuft absichtlich erst NACH multi-user.target (System vollstaendig
+# gebootet) - genau der Zeitpunkt, zu dem ein manuelles Setup-Skript
+# per SSH/Konsole zuverlaessig funktioniert. Frueheres Ausfuehren
+# (nur After=vyos-router.service, oder Polling auf dbus/polkit) war fragil.
+After=multi-user.target vyos-router.service eth0-force-up.service nss-lookup.target
 Wants=vyos-router.service nss-lookup.target
 ConditionPathExists=!/config/.rock5b-eth0-firstboot-done
 
 [Service]
 Type=oneshot
-# 'su - vyos' schlaegt hier fehl, weil der vyos-Benutzer zu diesem
-# Boot-Zeitpunkt noch nicht vollstaendig von VyOS' eigenem
-# Konfigurations-Anwendungsprozess angelegt wurde. Stattdessen als root
-# mit expliziter Umgebung ausfuehren; das Skript selbst wartet zusaetzlich
-# auf funktionierende Hostname-Aufloesung vor commit/save.
 Environment=HOME=/root
 Environment=USER=root
 Environment=LOGNAME=root
 Environment=TERM=linux
+# Zusaetzlicher fester Sicherheitsabstand nach Erreichen von
+# multi-user.target, bevor der eigentliche Commit-Versuch startet.
+ExecStartPre=/bin/sleep 20
 ExecStart=/usr/local/sbin/rock5b-eth0-firstboot.sh
 RemainAfterExit=yes
-TimeoutStartSec=120
+TimeoutStartSec=180
 StandardOutput=journal
 StandardError=journal
 

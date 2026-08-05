@@ -1,20 +1,19 @@
 #!/bin/vbash
 # Wird von einem eigenen systemd-Dienst (rock5b-eth0-firstboot.service)
-# nach vyos-router.service ausgefuehrt.
+# NACH multi-user.target ausgefuehrt - also erst, wenn das System als
+# vollstaendig gebootet gilt. Genau der Zeitpunkt, zu dem ein manuell per
+# SSH/Konsole ausgefuehrtes Setup-Skript zuverlaessig funktioniert.
+#
+# Frueher wurde versucht, exakt auf vyos-configd/vyos-hostsd/dbus/polkit
+# zu warten - das war fragil (falsche/wechselnde Dienstnamen fuehrten
+# zu Timeout, ohne dass ueberhaupt ein Configure-Versuch stattfand).
+# Einfacher und robuster: spaet genug starten (systemd-Ordering +
+# Sicherheitsabstand), dann EINMAL sauber versuchen - Punkt.
 #
 # Zweck: eth0 einmalig, beim allerersten Boot, dynamisch mit der
 # tatsaechlich erkannten MAC-Adresse dieses spezifischen Boards binden.
 # Board-unabhaengig: identisch fuer jedes Rock5B-Board, MAC wird zur
 # Laufzeit ermittelt.
-
-# In die vyattacfg-Gruppe wechseln, falls noch nicht dort - genau das
-# Muster, das modem-connect.sh bereits erfolgreich nutzt. systemd startet
-# uns sonst als root/root ohne vyattacfg-Gruppenkontext, was die
-# VyOS-Konfigurationssitzung stoeren kann.
-if [ "$(id -g -n)" != "vyattacfg" ]; then
-    printf -v _vyos_cmd "%q " /bin/vbash "$(readlink -f "$0")" "$@"
-    exec sg vyattacfg -c "$_vyos_cmd"
-fi
 
 MARKER="/config/.rock5b-eth0-firstboot-done"
 LOG="/config/rock5b-eth0-firstboot.log"
@@ -39,39 +38,6 @@ fi
 
 echo "$(date -Is) rock5b-eth0-firstboot: Erkannte MAC $MAC" >> "$LOG"
 
-# Auf vyos-configd, vyos-hostsd und funktionierende Hostname-Aufloesung
-# warten (verhindert "Failed to generate committed config" bei zu
-# frueher Ausfuehrung). Bis zu 60s, mit klarem Abbruch statt stillem
-# Weiterlaufen bei Timeout.
-# Zusaetzlich zu vyos-configd/vyos-hostsd/Hostname-Aufloesung auch D-Bus
-# und Polkit abwarten. VyOS' service_ssh.py startet ssh@default.service
-# ueber systemd-Unit-Management (D-Bus/Polkit) - ist das noch nicht
-# bereit, "gelingt" der commit zwar, aber ssh@default.service wird
-# nicht tatsaechlich gestartet.
-READY=0
-for i in $(seq 1 60); do
-    if systemctl is-active --quiet vyos-configd 2>/dev/null \
-       && systemctl is-active --quiet vyos-hostsd 2>/dev/null \
-       && systemctl is-active --quiet dbus 2>/dev/null \
-       && systemctl is-active --quiet polkit 2>/dev/null \
-       && getent hosts "$(hostname)" >/dev/null 2>&1; then
-        READY=1
-        break
-    fi
-    sleep 1
-done
-
-if [ "$READY" -ne 1 ]; then
-    echo "$(date -Is) rock5b-eth0-firstboot: vyos-configd/vyos-hostsd/dbus/polkit/Hostname-Aufloesung nach 60s nicht bereit, breche ab." >> "$LOG"
-    echo "$(date -Is) rock5b-eth0-firstboot: systemd wird beim naechsten Boot erneut versuchen (kein Marker gesetzt)." >> "$LOG"
-    exit 1
-fi
-echo "$(date -Is) rock5b-eth0-firstboot: vyos-configd/vyos-hostsd/dbus/polkit/Hostname-Aufloesung bereit" >> "$LOG"
-
-# Zusaetzliche Sicherheitspuffer-Wartezeit: D-Bus/Polkit "aktiv" heisst
-# nicht zwingend sofort voll funktionsfaehig fuer Unit-Management-Calls.
-sleep 5
-
 source /opt/vyatta/etc/functions/script-template
 configure
 
@@ -81,22 +47,8 @@ set interfaces ethernet eth0 address 'dhcp'
 set interfaces ethernet eth0 dhcp-options default-route-distance '1'
 set service ssh port '22'
 
-# commit kann kollidieren, wenn VyOS' eigener Boot-Zeit-Commit
-# (aus config.boot) noch nicht abgeschlossen ist ("Configuration system
-# temporarily locked due to another commit in progress"). Bis zu
-# 10x mit kurzer Pause erneut versuchen, statt nur einmal.
-COMMIT_OK=0
-for attempt in $(seq 1 10); do
-    if commit; then
-        COMMIT_OK=1
-        break
-    fi
-    echo "$(date -Is) rock5b-eth0-firstboot: commit fehlgeschlagen (Versuch $attempt/10), warte 3s" >> "$LOG"
-    sleep 3
-done
-
-if [ "$COMMIT_OK" -ne 1 ]; then
-    echo "$(date -Is) rock5b-eth0-firstboot: commit nach 10 Versuchen weiterhin fehlgeschlagen" >> "$LOG"
+if ! commit; then
+    echo "$(date -Is) rock5b-eth0-firstboot: commit fehlgeschlagen" >> "$LOG"
     discard
     exit 1
 fi
@@ -108,22 +60,5 @@ if ! save; then
 fi
 
 echo "$(date -Is) rock5b-eth0-firstboot: commit+save erfolgreich, MAC=$MAC" >> "$LOG"
-
-# Sicherheitsnetz: commit/save haben die Konfiguration geschrieben, aber
-# in diesem fruehen Boot-Kontext startet VyOS die eigentlichen operativen
-# Effekte (DHCP-Client, SSH-Neustart) manchmal nicht zuverlaessig selbst.
-# Deshalb hier explizit nachhelfen, statt uns nur auf VyOS' interne
-# Anwendungslogik zu verlassen.
-if ! ip -4 addr show eth0 | grep -q "inet "; then
-    echo "$(date -Is) rock5b-eth0-firstboot: Noch keine IPv4 auf eth0, stosse dhclient manuell an" >> "$LOG"
-    dhclient eth0 >> "$LOG" 2>&1 || true
-fi
-
-# HINWEIS: Kein SSH-Neustart-Fallback mehr - VyOS' eigenes service_ssh.py
-# startet ssh@default.service bereits korrekt beim commit. Ein zusaetzlicher
-# "systemctl restart ssh" hat sich als schaedlich erwiesen (SIGTERM auf die
-# bereits laufende ssh@default.service-Instanz, Port-Konflikt).
-
-echo "$(date -Is) rock5b-eth0-firstboot: Fertig. eth0: $(ip -4 addr show eth0 | grep 'inet ' || echo 'keine IP')" >> "$LOG"
 touch "$MARKER"
 exit
