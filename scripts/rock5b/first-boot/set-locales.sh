@@ -10,6 +10,10 @@
 
 set -o pipefail
 
+# Use a UTF-8 locale that is guaranteed to exist in the VyOS image.
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
 if [ "$(id -u)" -eq 0 ]; then
     echo 'Please run this script as the "vyos" user, not as root.'
     builtin exit 1
@@ -129,6 +133,25 @@ fi
 
 # End the VyOS configuration session before restarting system services.
 exit
+
+echo
+echo 'Persisting the system locale as C.UTF-8...'
+
+if ! printf '%s\n' 'LANG=C.UTF-8' 'LC_ALL=C.UTF-8' | sudo tee /etc/default/locale >/dev/null; then
+    echo 'WARNING: Could not write /etc/default/locale.' >&2
+fi
+
+if ! printf '%s\n' 'LANG=C.UTF-8' 'LC_ALL=C.UTF-8' | sudo tee /etc/environment >/dev/null; then
+    echo 'WARNING: Could not write /etc/environment.' >&2
+fi
+
+if sudo install -d -m 0755 /etc/systemd/system.conf.d; then
+    if ! printf '%s\n' '[Manager]' 'DefaultEnvironment=LANG=C.UTF-8 LC_ALL=C.UTF-8' | sudo tee /etc/systemd/system.conf.d/10-rock5b-locale.conf >/dev/null; then
+        echo 'WARNING: Could not write the systemd locale configuration.' >&2
+    fi
+else
+    echo 'WARNING: Could not create /etc/systemd/system.conf.d.' >&2
+fi
 
 echo
 echo 'Configuration saved. Restarting Chrony...'
