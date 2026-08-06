@@ -71,6 +71,7 @@ FM350_REGISTRATION_RESET_WAIT="${FM350_REGISTRATION_RESET_WAIT:-5}"
 FM350_REGISTRATION_RESET_DONE=0
 FM350_REGISTRATION_FAILURE=""
 MODEM_TRANSPORT="unknown"
+DYNAMIC_WWAN_ROUTE=0
 
 LEGACY_UNLOCK_SERVICE="/etc/systemd/system/fm350-unlock.service"
 LEGACY_UNLOCK_SCRIPT_CANDIDATES="/usr/local/sbin/fm350-unlock.sh /home/vyos/fm350-unlock.sh"
@@ -2198,6 +2199,18 @@ if [ "$SUCCESS" -eq 1 ]; then
     [ -n "$IP" ] || die "$BACKEND_USED did not configure an IPv4 address on $NET_IF eingerichtet"
     [ -n "$GATEWAY" ] || die "$BACKEND_USED did not provide an IPv4 gateway for $NET_IF geliefert"
   fi
+
+  # FM350 USB/AT-RNDIS receives a dynamic PDP address and gateway. Do not
+  # persist that gateway in config.boot: it may change on the next boot and
+  # would make FRR try to install an unreachable stale nexthop before the modem
+  # reconnects. Install the route in the running kernel instead; autostart
+  # recreates it after every boot or USB re-enumeration.
+  if [ "$BACKEND_USED" = at-rndis ] && [ "$MODEM_TRANSPORT" = usb ]; then
+    DYNAMIC_WWAN_ROUTE=1
+    ip route replace default via "$GATEWAY" dev "$NET_IF" metric "$((WWAN_ROUTE_DISTANCE * 2))"       || die "Could not install the dynamic FM350 USB default route"
+    log "Installed dynamic FM350 USB route in the running system; it will not be saved to config.boot."
+  fi
+
   if [ "$NO_SAVE_BACKEND" -eq 0 ]; then cache_write "$BACKEND_CACHE" "$MODEM_KEY" "$BACKEND_USED"; fi
   log "connection aktiv: Backend $BACKEND_USED, Interface $NET_IF, IPv4 ${IP:-PPP}/${PREFIX:-}, Gateway ${GATEWAY:-interface-route}"
 else
@@ -2394,13 +2407,17 @@ if [ "$WWAN_CONNECTED" -eq 1 ]; then
   printf 'set nat source rule %q translation address masquerade\n' "$WWAN_NAT_RULE" >> "$VYOS_CONFIG_HELPER"
 fi
 
-if [ -n "$OLD_GATEWAY" ] && { [ "$WWAN_CONNECTED" -eq 0 ] || [ "$OLD_GATEWAY" != "$GATEWAY" ]; }; then
+if [ -n "$OLD_GATEWAY" ] && { [ "$WWAN_CONNECTED" -eq 0 ] || [ "$DYNAMIC_WWAN_ROUTE" -eq 1 ] || [ "$OLD_GATEWAY" != "$GATEWAY" ]; }; then
   printf 'delete protocols static route 0.0.0.0/0 next-hop %q 2>/dev/null || true\n' "$OLD_GATEWAY" >> "$VYOS_CONFIG_HELPER"
 fi
 if [ "$WWAN_CONNECTED" -eq 1 ]; then
   if [ "$IP_METHOD" = ppp ]; then
     printf 'set protocols static route 0.0.0.0/0 interface %q\n' "$NET_IF" >> "$VYOS_CONFIG_HELPER"
     printf 'set protocols static route 0.0.0.0/0 interface %q distance %q\n' "$NET_IF" "$WWAN_ROUTE_DISTANCE" >> "$VYOS_CONFIG_HELPER"
+  elif [ "$DYNAMIC_WWAN_ROUTE" -eq 1 ]; then
+    # The FM350 USB gateway is dynamic. The runtime route was installed above;
+    # intentionally keep config.boot free of a stale next-hop.
+    :
   else
     printf 'delete protocols static route 0.0.0.0/0 next-hop %q 2>/dev/null || true\n' "$GATEWAY" >> "$VYOS_CONFIG_HELPER"
     printf 'set protocols static route 0.0.0.0/0 next-hop %q interface %q\n' "$GATEWAY" "$NET_IF" >> "$VYOS_CONFIG_HELPER"
@@ -2428,6 +2445,8 @@ vyos_desired_config_active() {
     printf '%s\n' "$active_cfg" | grep -F "set nat source rule $WWAN_NAT_RULE outbound-interface name" | grep -Fq "$NET_IF" && nat_ok=1
     if [ "$IP_METHOD" = ppp ]; then
       printf '%s\n' "$active_cfg" | grep -F "set protocols static route 0.0.0.0/0 interface" | grep -Fq "$NET_IF" && route_cfg_ok=1
+    elif [ "$DYNAMIC_WWAN_ROUTE" -eq 1 ]; then
+      ip -4 route show default dev "$NET_IF" | grep -Fq "via $GATEWAY" && route_cfg_ok=1
     elif printf '%s\n' "$active_cfg" | grep -Fq "set protocols static route 0.0.0.0/0 next-hop $GATEWAY"; then
       route_cfg_ok=1
     fi
@@ -2476,6 +2495,8 @@ for VERIFY_ATTEMPT in 1 2 3 4 5 6 7 8 9 10; do
     printf '%s\n' "$ACTIVE_CFG" | grep -F "set nat source rule $WWAN_NAT_RULE outbound-interface name" | grep -Fq "$NET_IF" && NAT_OK=1
     if [ "$IP_METHOD" = ppp ]; then
       printf '%s\n' "$ACTIVE_CFG" | grep -F "set protocols static route 0.0.0.0/0 interface" | grep -Fq "$NET_IF" && ROUTE_CFG_OK=1
+    elif [ "$DYNAMIC_WWAN_ROUTE" -eq 1 ]; then
+      ip -4 route show default dev "$NET_IF" | grep -Fq "via $GATEWAY" && ROUTE_CFG_OK=1
     elif printf '%s\n' "$ACTIVE_CFG" | grep -Fq "set protocols static route 0.0.0.0/0 next-hop $GATEWAY"; then ROUTE_CFG_OK=1; fi
   fi
   if [ "$WIRED_CONFIGURED" -eq 1 ]; then
