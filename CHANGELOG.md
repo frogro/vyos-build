@@ -4,6 +4,44 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v2026.08.07-rock5b] - 2026-08-07
+
+Updated community build with improved modem handling, locale initialization, and image security.
+
+### Changed
+
+- Updated the VyOS Rolling ARM64 userspace used for the ROCK 5B image.
+- Updated the VyOS build environment to kernel package `6.18.41-1`.
+- Converted the ROCK 5B helper scripts to consistent English output and prompts.
+- Improved `set-locales.sh` with configurable timezone, keyboard layout, wireless regulatory domain, DNS, and NTP servers.
+- Persisted the `C.UTF-8` locale for system services to prevent Perl locale warnings during early boot.
+- Improved the default image injection logic in `inject-defaults.sh`.
+- Improved FM350-GL detection and connection handling for both PCIe and USB transports.
+- Added a dedicated AT/RNDIS path for FM350-GL operation over USB without relying on ModemManager for the data connection.
+- Improved Ethernet WAN preference with WWAN fallback routing.
+
+### Fixed
+
+- Fixed stale FM350 FCC-unlock and AT-port runtime state after USB modem re-enumeration.
+- Improved automatic FM350 recovery after USB disconnects and modem reboots.
+- Fixed duplicate or stale DNS and NTP settings when rerunning the locale setup helper.
+- Fixed `set-locales.sh` behavior when the requested configuration is already active.
+- Removed embedded SSH host keys from the generated image so every installed system can generate its own host identity.
+- Reduced locale-related warnings during VyOS boot services.
+
+### Security
+
+- SSH private host keys are no longer included in the distributed image.
+- Each installed system generates its own SSH host keys.
+
+### Build
+
+- Built successfully from the VyOS Rolling ARM64 repository after publication of the `6.18.41-1` ARM64 kernel packages.
+- The ROCK 5B continues to boot with the Armbian `7.1.3-edge-rockchip64` kernel supplied by the ROCK 5B boot layer; the VyOS kernel package in the root filesystem is separate.
+- Release image SHA256:
+  `511a266f1498efa15c5502b14392db89366425a8603bf9294f72ad541738b0a3`
+
+
 ## [v2026.08.05-rock5b] - 2026-08-05
 
 Initial public release.
