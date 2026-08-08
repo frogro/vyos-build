@@ -1,5 +1,5 @@
 #!/bin/vbash
-# VyOS wireless AP, DHCP, and optional Ethernet WAN setup for ROCK 5B - Version 7
+# VyOS wireless AP, DHCP, and optional Ethernet WAN setup for ROCK 5B - Version 8.1 - stable config.boot reproduction and cellular-WAN filtering
 # Erkennt alle WLAN-devicee, laesst einen AP-faehigen Adapter auswaehlen,
 # persistently binds the VyOS configuration to the selected MAC address,
 # configures the local DHCP server, and optionally enables Ethernet WAN with NAT,
@@ -19,6 +19,9 @@ DHCP_NAME="${DHCP_NAME:-PHOTOBOOTH}"
 DHCP_START="${DHCP_START:-10.3.141.51}"
 DHCP_STOP="${DHCP_STOP:-10.3.141.250}"
 DHCP_DNS="${DHCP_DNS:-1.1.1.1}"
+DNS_FORWARD_1="${DNS_FORWARD_1:-1.1.1.1}"
+DNS_FORWARD_2="${DNS_FORWARD_2:-8.8.8.8}"
+WAN_ROUTE_DISTANCE="${WAN_ROUTE_DISTANCE:-1}"
 FORCED_IF="${VYOS_IF:-}"
 AP_IF_CACHE="${AP_IF_CACHE:-/etc/photobooth-ap-interface.conf}"
 OLD_UDEV_RULE="${OLD_UDEV_RULE:-/etc/udev/rules.d/70-vyos-ap-phy.rules}"
@@ -164,6 +167,26 @@ ssh_is_running() {
   return 1
 }
 
+is_fm350_rndis_interface() {
+  local iface="$1" dev vendor product driver
+  [ -e "/sys/class/net/$iface/device" ] || return 1
+  dev="$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null || true)"
+  driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '/^driver:/ {print $2; exit}')"
+  [ "$driver" = "rndis_host" ] || return 1
+
+  while [ -n "$dev" ] && [ "$dev" != "/" ]; do
+    if [ -r "$dev/idVendor" ] && [ -r "$dev/idProduct" ]; then
+      vendor="$(cat "$dev/idVendor" 2>/dev/null || true)"
+      product="$(cat "$dev/idProduct" 2>/dev/null || true)"
+      if [ "$vendor" = "0e8d" ] && { [ "$product" = "7126" ] || [ "$product" = "7127" ]; }; then
+        return 0
+      fi
+    fi
+    dev="${dev%/*}"
+  done
+  return 1
+}
+
 detect_connected_ethernet() {
   local iface path carrier oper type
   for path in /sys/class/net/*; do
@@ -175,6 +198,10 @@ detect_connected_ethernet() {
     [ -e "$path/device" ] || continue
     type="$(cat "$path/type" 2>/dev/null || true)"
     [ "$type" = "1" ] || continue
+    if is_fm350_rndis_interface "$iface"; then
+      echo "NOTE: excluding $iface from Ethernet-WAN candidates (FM350 USB/RNDIS modem)." >&2
+      continue
+    fi
     carrier="$(cat "$path/carrier" 2>/dev/null || echo 0)"
     oper="$(cat "$path/operstate" 2>/dev/null || true)"
     if [ "$carrier" = "1" ] || [ "$oper" = "up" ]; then
@@ -526,8 +553,25 @@ set service dhcp-server shared-network-name "$DHCP_NAME" authoritative
 set service dhcp-server shared-network-name "$DHCP_NAME" subnet "$AP_NET" subnet-id '1'
 set service dhcp-server shared-network-name "$DHCP_NAME" subnet "$AP_NET" option default-router "$AP_GATEWAY"
 set service dhcp-server shared-network-name "$DHCP_NAME" subnet "$AP_NET" option name-server "$DHCP_DNS"
+set service dhcp-server shared-network-name "$DHCP_NAME" subnet "$AP_NET" option name-server "$AP_GATEWAY"
 set service dhcp-server shared-network-name "$DHCP_NAME" subnet "$AP_NET" range 0 start "$DHCP_START"
 set service dhcp-server shared-network-name "$DHCP_NAME" subnet "$AP_NET" range 0 stop "$DHCP_STOP"
+
+# Reproduce the known-good DNS forwarding setup from config.boot.
+delete service dns forwarding 2>/dev/null || true
+set service dns forwarding allow-from "$AP_NET"
+set service dns forwarding listen-address "$AP_GATEWAY"
+set service dns forwarding name-server "$DNS_FORWARD_1"
+set service dns forwarding name-server "$DNS_FORWARD_2"
+
+# Reproduce the known-good AP -> WAN forward policy.
+# Rule 20 sends traffic arriving from the AP to an accept chain.
+delete firewall ipv4 forward filter rule 20 2>/dev/null || true
+delete firewall ipv4 name PHOTOBOOTH-AP-OUT 2>/dev/null || true
+set firewall ipv4 name PHOTOBOOTH-AP-OUT default-action 'accept'
+set firewall ipv4 forward filter rule 20 action 'jump'
+set firewall ipv4 forward filter rule 20 inbound-interface name "$VYOS_IF"
+set firewall ipv4 forward filter rule 20 jump-target 'PHOTOBOOTH-AP-OUT'
 
 echo "[2/2] Committing DHCP configuration ..."
 if ! commit; then
@@ -541,12 +585,33 @@ echo "[2/2] DHCP saved."
 WAN_CONFIGURED=0
 if [ -n "$WAN_IF_SELECTED" ]; then
   echo "[3/3] Ethernet WAN $WAN_IF_SELECTED configuring ..."
+
+  # Ethernet is the primary WAN. Keep this ownership in the AP/WAN script;
+  # modem-connect.sh must never rewrite it.
   set interfaces ethernet "$WAN_IF_SELECTED" address 'dhcp'
+  set interfaces ethernet "$WAN_IF_SELECTED" description 'WAN-LAN-DHCP'
+  set interfaces ethernet "$WAN_IF_SELECTED" dhcp-options default-route-distance "$WAN_ROUTE_DISTANCE"
+
+  # Remove the legacy duplicate Ethernet NAT rule created by older modem scripts.
+  if [ "$NAT_RULE" != "100" ]; then
+    delete nat source rule 100 2>/dev/null || true
+  fi
   delete nat source rule "$NAT_RULE" 2>/dev/null || true
-  set nat source rule "$NAT_RULE" description 'PHOTOBOOTH-AP-to-ETHERNET-WAN'
+  set nat source rule "$NAT_RULE" description 'AP-NET-to-WIRED-WAN'
   set nat source rule "$NAT_RULE" outbound-interface name "$WAN_IF_SELECTED"
   set nat source rule "$NAT_RULE" source address "$AP_NET"
   set nat source rule "$NAT_RULE" translation address 'masquerade'
+
+  # WAN -> router/AP forwarding: only established/related return traffic.
+  delete firewall ipv4 forward filter rule 10 2>/dev/null || true
+  delete firewall ipv4 name PHOTOBOOTH-WAN-IN 2>/dev/null || true
+  set firewall ipv4 name PHOTOBOOTH-WAN-IN default-action 'drop'
+  set firewall ipv4 name PHOTOBOOTH-WAN-IN rule 10 action 'accept'
+  set firewall ipv4 name PHOTOBOOTH-WAN-IN rule 10 state 'established'
+  set firewall ipv4 name PHOTOBOOTH-WAN-IN rule 10 state 'related'
+  set firewall ipv4 forward filter rule 10 action 'jump'
+  set firewall ipv4 forward filter rule 10 inbound-interface name "$WAN_IF_SELECTED"
+  set firewall ipv4 forward filter rule 10 jump-target 'PHOTOBOOTH-WAN-IN'
 
   echo "[3/3] Committing Ethernet WAN/NAT ..."
   if ! commit; then
@@ -572,6 +637,9 @@ DHCP_START='$DHCP_START'
 DHCP_STOP='$DHCP_STOP'
 WAN_IF='$WAN_IF_SELECTED'
 NAT_RULE='$NAT_RULE'
+WAN_ROUTE_DISTANCE='$WAN_ROUTE_DISTANCE'
+DNS_FORWARD_1='$DNS_FORWARD_1'
+DNS_FORWARD_2='$DNS_FORWARD_2'
 CACHE
 chmod 600 "$AP_IF_CACHE"
 

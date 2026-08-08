@@ -1,4 +1,6 @@
 #!/bin/vbash
+# Optimized ROCK 5B variant v5.3: FM350 USB/RNDIS hard-isolates ModemManager; other modems can re-enable it on demand.
+# FM350 USB uses native eth1 on ROCK 5B; other modems keep their detected data-interface names.
 #
 # modem-connect.sh
 # Universal modem setup for VyOS on ROCK 5B.
@@ -35,15 +37,28 @@ AP_GATEWAY="${AP_GATEWAY:-10.3.141.50}"
 AP_NET="${AP_NET:-10.3.141.0/24}"
 WIRED_ROUTE_DISTANCE="${WIRED_ROUTE_DISTANCE:-1}"
 WWAN_ROUTE_DISTANCE="${WWAN_ROUTE_DISTANCE:-10}"
+# Linux runtime metric for dynamic USB/RNDIS default route. It must be
+# clearly worse than the Ethernet DHCP default route (normally metric 20).
+WWAN_ROUTE_METRIC="${WWAN_ROUTE_METRIC:-200}"
 WWAN_NAT_RULE="${WWAN_NAT_RULE:-160}"
 WIRED_NAT_RULE="${WIRED_NAT_RULE:-100}"
 SELF_PATH="$(readlink -f "$0")"
 SERVICE_PATH="/etc/systemd/system/modem-connect.service"
 UNLOCK_SERVICE_PATH="/etc/systemd/system/modem-unlock.service"
 FM350_RECOVERY_SERVICE_PATH="/etc/systemd/system/modem-connect-recover.service"
+FM350_RECOVERY_TIMER_PATH="/etc/systemd/system/modem-connect-recover.timer"
 FM350_UDEV_RULE="/etc/udev/rules.d/80-fm350-rndis-recover.rules"
+FM350_MM_IGNORE_RULE="/etc/udev/rules.d/79-fm350-modemmanager-ignore.rules"
 FM350_LINK_FILE="/etc/systemd/network/10-fm350-rndis.link"
-FM350_STABLE_IF="${FM350_STABLE_IF:-wwanusb0}"
+FAILOVER_SCRIPT_PATH="/usr/local/sbin/modem-wan-failover.sh"
+FAILOVER_SERVICE_PATH="/etc/systemd/system/modem-wan-failover.service"
+FAILOVER_POLL_SEC="${FAILOVER_POLL_SEC:-2}"
+RECOVERY_PING_TARGET="${RECOVERY_PING_TARGET:-1.1.1.1}"
+RECOVERY_PING_ATTEMPTS="${RECOVERY_PING_ATTEMPTS:-4}"
+RECOVERY_PING_WAIT="${RECOVERY_PING_WAIT:-2}"
+WWAN_NOIP_ATTEMPTS="${WWAN_NOIP_ATTEMPTS:-4}"
+WWAN_RECOVERY_COOLDOWN="${WWAN_RECOVERY_COOLDOWN:-60}"
+FM350_STABLE_IF="${FM350_STABLE_IF:-eth1}"
 UNLOCK_STATE_DIR="${UNLOCK_STATE_DIR:-/run/modem-connect}"
 FM350_RECOVERY_LOCK="${FM350_RECOVERY_LOCK:-/run/modem-connect/fm350-recovery.lock}"
 FM350_AT_CACHE="${FM350_AT_CACHE:-/run/modem-connect/fm350-at-port.conf}"
@@ -72,6 +87,10 @@ FM350_REGISTRATION_RESET_DONE=0
 FM350_REGISTRATION_FAILURE=""
 MODEM_TRANSPORT="unknown"
 DYNAMIC_WWAN_ROUTE=0
+# Preserve an already working wired default route across VyOS commits.
+WIRED_DEFAULT_BEFORE=""
+WIRED_GATEWAY_BEFORE=""
+WIRED_DEFAULT_METRIC="${WIRED_DEFAULT_METRIC:-20}"
 
 LEGACY_UNLOCK_SERVICE="/etc/systemd/system/fm350-unlock.service"
 LEGACY_UNLOCK_SCRIPT_CANDIDATES="/usr/local/sbin/fm350-unlock.sh /home/vyos/fm350-unlock.sh"
@@ -211,9 +230,9 @@ if [ "$SERVICE_RUN" -eq 1 ]; then
     "") ;;
     *) [[ "$SAVED_WIRED_WAN" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] && WIRED_WAN="$SAVED_WIRED_WAN" ;;
   esac
-  if [[ "$SAVED_FM350_STABLE_IF" =~ ^[A-Za-z0-9_.-]{1,15}$ ]]; then
-    FM350_STABLE_IF="$SAVED_FM350_STABLE_IF"
-  fi
+  # ROCK 5B policy: the USB/RNDIS FM350 uses the kernel's native eth1 name.
+  # Ignore legacy FM350_STABLE_IF=wwanusb0 values from older installations.
+  FM350_STABLE_IF="eth1"
   BACKEND_MODE="${SAVED_BACKEND_POLICY:-auto}"
   [ -n "$SAVED_MULTIPLEX" ] && MULTIPLEX_MODE="$SAVED_MULTIPLEX"
   [ -n "$SAVED_AP_NET" ] && AP_NET="$SAVED_AP_NET"
@@ -227,6 +246,65 @@ case "$WIRED_WAN" in auto|none) ;; *) [[ "$WIRED_WAN" =~ ^[A-Za-z0-9_.-]{1,15}$ 
 case "$AP_NET" in */*) ;; *) die "--ap-net muss CIDR enthalten" ;; esac
 [ "$EUID" -eq 0 ] || die "Please run with sudo"
 
+# Take ownership from older modem-connect versions before touching the FM350.
+# Old recovery timers/udev rules could otherwise start v2.1 concurrently and
+# recreate the wwanusb0 .link file while this script is migrating to eth1.
+if [ "$SERVICE_RUN" -eq 0 ] && [ "$RECOVER_ONLY" -eq 0 ] && [ "$UNLOCK_ONLY" -eq 0 ]; then
+  systemctl disable --now modem-connect-recover.timer >/dev/null 2>&1 || true
+  systemctl stop modem-connect-recover.service >/dev/null 2>&1 || true
+  systemctl stop modem-connect.service >/dev/null 2>&1 || true
+  systemctl stop modem-unlock.service >/dev/null 2>&1 || true
+  systemctl stop modem-wan-failover.service >/dev/null 2>&1 || true
+  systemctl disable --now modem-connect-recover.timer >/dev/null 2>&1 || true
+  rm -f "$FM350_RECOVERY_TIMER_PATH"
+fi
+rm -f "$FM350_LINK_FILE" "$FM350_UDEV_RULE" 2>/dev/null || true
+
+# Rewrite the two primary units immediately so any dependency started later in
+# this run can only invoke this exact script, never an older v2/v2.1 copy.
+cat > "$UNLOCK_SERVICE_PATH" <<EOF
+[Unit]
+Description=Run modem-specific FCC unlock before the WWAN connection
+After=systemd-modules-load.service systemd-udev-trigger.service
+Before=modem-connect.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=${SELF_PATH} --service-run --unlock-only
+RemainAfterExit=yes
+TimeoutStartSec=240
+Restart=on-failure
+RestartSec=15
+StandardInput=null
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > "$SERVICE_PATH" <<EOF
+[Unit]
+Description=Automatically connect the modem and configure the VyOS WWAN fallback
+After=vyos-router.service systemd-modules-load.service systemd-udev-trigger.service modem-unlock.service network.target
+Requires=vyos-router.service modem-unlock.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=${SELF_PATH} --service-run
+RemainAfterExit=yes
+TimeoutStartSec=600
+Restart=on-failure
+RestartSec=20
+StandardInput=null
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable modem-unlock.service modem-connect.service >/dev/null 2>&1 || true
+udevadm control --reload-rules 2>/dev/null || true
+
 need_cmd ip
 need_cmd awk
 need_cmd sed
@@ -238,6 +316,16 @@ need_cmd udevadm
 need_cmd modprobe
 need_cmd python3
 
+# Remove the legacy persistent rename created by older optimized/v2 scripts.
+# This is intentionally done on every invocation (interactive, service, unlock,
+# recovery), so an old service/config can never bring wwanusb0 naming back.
+if [ -e "$FM350_LINK_FILE" ]; then
+  rm -f "$FM350_LINK_FILE"
+  udevadm control --reload-rules 2>/dev/null || true
+  log "Removed legacy FM350 RNDIS rename rule; native interface name eth1 will be used."
+fi
+FM350_STABLE_IF="eth1"
+
 if [ "$UNLOCK_ONLY" -eq 1 ] || [ "$RECOVER_ONLY" -eq 1 ]; then
   AP_IF=""
 else
@@ -246,11 +334,6 @@ else
   fi
   [ -n "$AP_IF" ] || AP_IF="wlan0"
   log "AP interface for NAT/detection: $AP_IF"
-fi
-
-if [ "$SERVICE_RUN" -eq 0 ] && [ "$RECOVER_ONLY" -eq 0 ]; then
-  systemctl stop modem-connect.service >/dev/null 2>&1 || true
-  systemctl stop modem-unlock.service >/dev/null 2>&1 || true
 fi
 
 mmcli_timed() {
@@ -381,9 +464,9 @@ EOF
 
 uninstall_all() {
   log "Deinstalliere modem-connect..."
-  systemctl disable --now modem-connect.service modem-unlock.service modem-connect-recover.service 2>/dev/null || true
+  systemctl disable --now modem-connect.service modem-unlock.service modem-connect-recover.service modem-connect-recover.timer 2>/dev/null || true
   stop_native_sessions
-  rm -f "$SERVICE_PATH" "$UNLOCK_SERVICE_PATH" "$FM350_RECOVERY_SERVICE_PATH" "$FM350_UDEV_RULE" "$FM350_LINK_FILE"
+  rm -f "$SERVICE_PATH" "$UNLOCK_SERVICE_PATH" "$FM350_RECOVERY_SERVICE_PATH" "$FM350_RECOVERY_TIMER_PATH" "$FM350_UDEV_RULE" "$FM350_MM_IGNORE_RULE" "$FM350_LINK_FILE" "$FAILOVER_SERVICE_PATH" "$FAILOVER_SCRIPT_PATH"
   cleanup_legacy
   remove_managed_vyos_config
   rm -f "$APN_CACHE" "$MUX_CACHE" "$BACKEND_CACHE" "$ROUTE_CACHE" "$CONFIG_FILE"
@@ -534,22 +617,40 @@ fm350_install_rndis_recovery() {
   mac="$(cat "/sys/class/net/$current/address" 2>/dev/null || true)"
   [ -n "$mac" ] || return 0
 
-  mkdir -p "$(dirname "$FM350_LINK_FILE")" "$(dirname "$FM350_UDEV_RULE")"
-  cat > "$FM350_LINK_FILE" <<EOF
-[Match]
-MACAddress=$mac
-Driver=rndis_host
+  # The ROCK 5B kernel naturally creates the FM350 RNDIS interface as eth1
+  # (eth0 is the onboard Ethernet port). Do NOT rename it. The previous
+  # wwanusb0 .link file is removed so the kernel name stays untouched.
+  rm -f "$FM350_LINK_FILE"
 
-[Link]
-NamePolicy=
-Name=$FM350_STABLE_IF
-EOF
-  chmod 0644 "$FM350_LINK_FILE"
+  # One-time migration from an older wwanusb0 installation: undo the old
+  # persistent name immediately when eth1 is free. Future enumerations are
+  # left entirely to the kernel and naturally come up as eth1 on this ROCK 5B.
+  if [ "$current" = wwanusb0 ] && ! ip link show eth1 >/dev/null 2>&1; then
+    ip link set dev "$current" down 2>/dev/null || true
+    if ip link set dev "$current" name eth1 2>/dev/null; then
+      current=eth1
+      FM350_RNDIS_IF=eth1
+      ip link set dev eth1 up 2>/dev/null || true
+      log "Removed legacy wwanusb0 naming; FM350 now uses native interface eth1."
+    else
+      ip link set dev "$current" up 2>/dev/null || true
+      warn "Legacy interface $current could not be migrated to eth1 during this run; after the next USB re-enumeration/reboot it will use eth1."
+    fi
+  fi
 
-  # von udev gestartet will be.
+  # Never persist a legacy runtime name. If migration could not be done in this
+  # invocation, keep the policy at eth1; the next USB re-enumeration will use it.
+  FM350_STABLE_IF="eth1"
+  log "FM350 RNDIS native-name policy is eth1; no persistent rename rule is installed."
+
+  # v5 is event-driven only: remove timer artifacts left by older versions.
+  systemctl disable --now modem-connect-recover.timer >/dev/null 2>&1 || true
+  rm -f "$FM350_RECOVERY_TIMER_PATH"
+
+  mkdir -p "$(dirname "$FM350_UDEV_RULE")"
   cat > "$FM350_RECOVERY_SERVICE_PATH" <<EOF
 [Unit]
-Description=FM350-RNDIS check after boot or USB re-enumeration and repair when required
+Description=FM350 RNDIS structural recovery after USB re-enumeration
 After=vyos-router.service modem-connect.service systemd-udev-settle.service
 Wants=modem-connect.service
 Requires=vyos-router.service
@@ -561,9 +662,6 @@ Type=oneshot
 ExecStart=${SELF_PATH} --recover
 TimeoutStartSec=900
 StandardInput=null
-
-[Install]
-WantedBy=multi-user.target
 EOF
   chmod 0644 "$FM350_RECOVERY_SERVICE_PATH"
 
@@ -572,34 +670,11 @@ ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0e
 ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="7127", TAG+="systemd", ENV{SYSTEMD_WANTS}+="modem-connect-recover.service"
 ACTION=="add", SUBSYSTEM=="net", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="7126", TAG+="systemd", ENV{SYSTEMD_WANTS}+="modem-connect-recover.service"
 ACTION=="add", SUBSYSTEM=="net", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="7127", TAG+="systemd", ENV{SYSTEMD_WANTS}+="modem-connect-recover.service"
-ACTION=="change", SUBSYSTEM=="net", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="7126", TAG+="systemd", ENV{SYSTEMD_WANTS}+="modem-connect-recover.service"
-ACTION=="change", SUBSYSTEM=="net", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="7127", TAG+="systemd", ENV{SYSTEMD_WANTS}+="modem-connect-recover.service"
-ACTION=="move", SUBSYSTEM=="net", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="7126", TAG+="systemd", ENV{SYSTEMD_WANTS}+="modem-connect-recover.service"
-ACTION=="move", SUBSYSTEM=="net", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="7127", TAG+="systemd", ENV{SYSTEMD_WANTS}+="modem-connect-recover.service"
 EOF
   chmod 0644 "$FM350_UDEV_RULE"
 
   systemctl daemon-reload
-  systemctl enable modem-connect-recover.service >/dev/null 2>&1 || true
-  udevadm control --reload-rules 2>/dev/null || true
-
-  if [ "$current" != "$FM350_STABLE_IF" ] && ! ip link show "$FM350_STABLE_IF" >/dev/null 2>&1; then
-    ip link set dev "$current" down 2>/dev/null || true
-    if ip link set dev "$current" name "$FM350_STABLE_IF" 2>/dev/null; then
-      FM350_RNDIS_IF="$FM350_STABLE_IF"
-      ip link set dev "$FM350_RNDIS_IF" up 2>/dev/null || true
-      log "FM350-RNDIS-Interface dauerhaft auf $FM350_RNDIS_IF festgelegt."
-    else
-      ip link set dev "$current" up 2>/dev/null || true
-      warn "Current FM350 interface $current could not be renamed to $FM350_STABLE_IF immediately; the .link file will apply after the next USB reset/boot."
-    fi
-  elif ip link show "$FM350_STABLE_IF" >/dev/null 2>&1; then
-    if fm350_path_belongs "/sys/class/net/$FM350_STABLE_IF/device"; then
-      FM350_RNDIS_IF="$FM350_STABLE_IF"
-    else
-      warn "Stabiler FM350-Name $FM350_STABLE_IF is already used by another interface; temporarily using $current."
-    fi
-  fi
+      udevadm control --reload-rules 2>/dev/null || true
 }
 
 detect_fm350_transport() {
@@ -653,6 +728,7 @@ detect_fm350_transport() {
     MODEM_DRIVER="usb"
     MODEM_DEVICE_ID="fm350-usb-${FM350_USB_ID//:/-}-$(basename "$FM350_SYS")"
     fm350_set_usb_power
+    fm350_install_mm_ignore_rule
     udevadm settle --timeout=20 2>/dev/null || true
     fm350_find_rndis_iface || true
     [ -n "$FM350_RNDIS_IF" ] && fm350_install_rndis_recovery
@@ -690,20 +766,29 @@ fm350_recovery_detect_usb_iface() {
 }
 
 fm350_recovery_path_ok() {
-  local iface="$1" ip4 route_line
+  local iface="$1" ip4 route_line try
   [ -n "$iface" ] && ip link show "$iface" >/dev/null 2>&1 || return 1
   ip4="$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk 'NR==1 {print $4}')"
   [ -n "$ip4" ] || return 1
 
-  # zweite Default-Route for WWAN. Eine forced routensuche plus gebundener Ping
-  route_line="$(ip -4 route get 1.1.1.1 oif "$iface" 2>/dev/null | head -1 || true)"
+  # First require the structural path: interface + IPv4 + route.
+  route_line="$(ip -4 route get "$RECOVERY_PING_TARGET" oif "$iface" 2>/dev/null | head -1 || true)"
   [ -n "$route_line" ] || return 1
-  /bin/ping -n -I "$iface" -c 3 -W 2 1.1.1.1 >/dev/null 2>&1
+
+  # Never recover because of one lost packet. Require FOUR consecutive
+  # bound failures. Any successful reply immediately declares the path healthy.
+  for try in $(seq 1 "$RECOVERY_PING_ATTEMPTS"); do
+    if /bin/ping -I "$iface" -c 1 -W "$RECOVERY_PING_WAIT" "$RECOVERY_PING_TARGET" >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$try" -lt "$RECOVERY_PING_ATTEMPTS" ] && sleep 2
+  done
+  return 1
 }
 
 fm350_recover_after_usb_event() (
   local state substate step saved_if iface found=0
-  log "FM350 recovery started: boot/udev trigger; checking USB device, RNDIS port, IP, route, and data path."
+  log "FM350 recovery started: boot/udev trigger; checking USB device, native RNDIS interface, IP and route."
   mkdir -p "$(dirname "$FM350_RECOVERY_LOCK")"
   if ! mkdir "$FM350_RECOVERY_LOCK" 2>/dev/null; then
     log "FM350 recovery is already running; ignoring the additional event."
@@ -712,7 +797,8 @@ fm350_recover_after_usb_event() (
   trap 'rmdir "$FM350_RECOVERY_LOCK" 2>/dev/null || true' EXIT
 
   saved_if="$(config_get FM350_STABLE_IF)"
-  if [[ "$saved_if" =~ ^[A-Za-z0-9_.-]{1,15}$ ]]; then FM350_STABLE_IF="$saved_if"; fi
+  # Ignore legacy saved names (especially wwanusb0); ROCK 5B USB/RNDIS policy is eth1.
+  FM350_STABLE_IF="eth1"
 
   for step in $(seq 1 90); do
     state="$(systemctl show modem-connect.service -p ActiveState --value 2>/dev/null || true)"
@@ -743,7 +829,7 @@ fm350_recover_after_usb_event() (
     exit 0
   fi
 
-  warn "FM350-Recovery: Data path through $iface is not working; unlock and connection will be rebuilt in a controlled manner."
+  warn "FM350-Recovery: structural path exists but $RECOVERY_PING_ATTEMPTS consecutive bound health checks failed through $iface; unlock and connection will be rebuilt in a controlled manner."
   rm -f "$FM350_AT_CACHE" "$UNLOCK_STATE_DIR"/*.fm350-fcc.ok
   systemctl reset-failed modem-unlock.service modem-connect.service 2>/dev/null || true
   systemctl restart modem-unlock.service || { warn "modem-unlock.service could not be restarted"; exit 1; }
@@ -904,10 +990,53 @@ fm350_query_identity() {
   return 0
 }
 
+fm350_install_mm_ignore_rule() {
+  mkdir -p "$(dirname "$FM350_MM_IGNORE_RULE")"
+  cat > "$FM350_MM_IGNORE_RULE" <<'EOF'
+# Managed by modem-connect v5.3.
+# Never let ModemManager probe/claim the FM350 while it is in the USB/RNDIS
+# composition. Other modem vendors and transports remain untouched.
+ACTION!="remove", SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="7126", ENV{ID_MM_DEVICE_IGNORE}="1"
+ACTION!="remove", SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="7127", ENV{ID_MM_DEVICE_IGNORE}="1"
+ACTION!="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="7126", ENV{ID_MM_PORT_IGNORE}="1"
+ACTION!="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="7127", ENV{ID_MM_PORT_IGNORE}="1"
+ACTION!="remove", SUBSYSTEM=="net", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="7126", ENV{ID_MM_PORT_IGNORE}="1"
+ACTION!="remove", SUBSYSTEM=="net", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="7127", ENV{ID_MM_PORT_IGNORE}="1"
+EOF
+  chmod 0644 "$FM350_MM_IGNORE_RULE"
+  udevadm control --reload-rules >/dev/null 2>&1 || true
+}
+
+fm350_block_modemmanager() {
+  fm350_install_mm_ignore_rule
+
+  # v5.3 deliberately masks MM while an FM350 USB/RNDIS transport is selected.
+  # This prevents D-Bus/udev activation from starting MM behind our back.
+  if systemctl is-active --quiet ModemManager.service; then
+    log "Stopping ModemManager for FM350 USB/RNDIS."
+    timeout --signal=TERM --kill-after=5s 30s systemctl stop ModemManager.service >/dev/null 2>&1 || true
+  fi
+  systemctl mask --now ModemManager.service >/dev/null 2>&1 || true
+  log "ModemManager is masked while FM350 USB/RNDIS is active; FM350 is managed exclusively through AT/RNDIS."
+}
+
+modemmanager_allow_for_other_modems() {
+  # If v5.3 previously masked MM for an FM350, a later run with another modem
+  # must remain compatible: remove our mask and allow the selected MM backend.
+  if [ "$(systemctl is-enabled ModemManager.service 2>/dev/null || true)" = "masked" ]; then
+    log "Non-FM350/MM backend requires ModemManager; removing the FM350 mask."
+    systemctl unmask ModemManager.service >/dev/null 2>&1 || return 1
+  fi
+  return 0
+}
+
 start_mm() {
   have_cmd mmcli || return 1
-  if ! systemctl is-active --quiet ModemManager; then
-    systemctl enable --now ModemManager >/dev/null 2>&1 || return 1
+  modemmanager_allow_for_other_modems || return 1
+
+  # v5.3: MM remains strictly on-demand. No static systemd dependency exists.
+  if ! systemctl is-active --quiet ModemManager.service; then
+    systemctl start ModemManager.service >/dev/null 2>&1 || return 1
     sleep 3
   fi
 }
@@ -1443,7 +1572,7 @@ detect_wired_wan_early() {
 }
 
 prepare_wired_wan_early() {
-  local ip4="" route=""
+  local ip4="" route="" gateway="" metric=""
   WIRED_WAN_REQUEST="$WIRED_WAN"
   case "$WIRED_WAN" in
     auto) WIRED_WAN="$(detect_wired_wan_early 2>/dev/null || true)" ;;
@@ -1460,11 +1589,117 @@ prepare_wired_wan_early() {
   ip4="$(ip -4 -o addr show dev "$WIRED_WAN" scope global 2>/dev/null | awk 'NR==1 {print $4}')"
   route="$(ip -4 route show default dev "$WIRED_WAN" 2>/dev/null | head -1 || true)"
   if [ -n "$ip4" ] && [ -n "$route" ]; then
+    WIRED_DEFAULT_BEFORE="$route"
+    gateway="$(printf '%s\n' "$route" | awk '{for (i=1;i<=NF;i++) if ($i=="via") {print $(i+1); exit}}')"
+    metric="$(printf '%s\n' "$route" | awk '{for (i=1;i<=NF;i++) if ($i=="metric") {print $(i+1); exit}}')"
+    [ -n "$gateway" ] && WIRED_GATEWAY_BEFORE="$gateway"
+    [ -n "$metric" ] && WIRED_DEFAULT_METRIC="$metric"
     log "Wired WAN is already operational: $WIRED_WAN, IPv4 $ip4, Route $route"
   else
-    log "Wired WAN queued: $WIRED_WAN; DHCP, route distance, and NAT will be configured in the shared VyOS configuration session."
+    if [ -n "$ip4" ] && [ "$(cat "/sys/class/net/$WIRED_WAN/carrier" 2>/dev/null || true)" = 1 ]; then
+      log "Wired WAN $WIRED_WAN has carrier and IPv4 $ip4 but its default route is missing; attempting to restore the DHCP gateway before modem setup."
+      restore_wired_default_route
+      route="$(ip -4 route show default dev "$WIRED_WAN" 2>/dev/null | head -1 || true)"
+      if [ -n "$route" ]; then
+        gateway="$(printf '%s\n' "$route" | awk '{for (i=1;i<=NF;i++) if ($i=="via") {print $(i+1); exit}}')"
+        metric="$(printf '%s\n' "$route" | awk '{for (i=1;i<=NF;i++) if ($i=="metric") {print $(i+1); exit}}')"
+        [ -n "$gateway" ] && WIRED_GATEWAY_BEFORE="$gateway"
+        [ -n "$metric" ] && WIRED_DEFAULT_METRIC="$metric"
+        WIRED_DEFAULT_BEFORE="$route"
+        log "Wired WAN restored before modem setup: $WIRED_WAN, IPv4 $ip4, Route $route"
+      else
+        log "Wired WAN queued: $WIRED_WAN; DHCP configuration exists, but no usable default route is currently available."
+      fi
+    else
+      log "Wired WAN queued: $WIRED_WAN; DHCP, route distance, and NAT will be configured in the shared VyOS configuration session."
+    fi
   fi
   return 0
+}
+
+discover_wired_gateway() {
+  local iface="$1" gw="" lease="" ipcidr="" guessed=""
+
+  # 1) Existing route (best source).
+  gw="$(ip -4 route show default dev "$iface" 2>/dev/null | awk 'NR==1 {for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')"
+  [ -n "$gw" ] && { printf '%s' "$gw"; return 0; }
+
+  # 2) DHCP lease files used by Debian/VyOS variants. Read the newest matching
+  #    lease first and take the last routers value found there.
+  while read -r lease; do
+    [ -r "$lease" ] || continue
+    gw="$(awk '/^[[:space:]]*option routers[[:space:]]+/ {gsub(/[;,]/,"",$3); value=$3} END {print value}' "$lease" 2>/dev/null)"
+    if [ -n "$gw" ]; then
+      printf '%s' "$gw"
+      return 0
+    fi
+  done < <(find /run /var/lib/dhcp /var/lib/dhcp3 -maxdepth 2 -type f \
+      \( -name "*${iface}*.lease*" -o -name 'dhclient*.lease*' \) \
+      -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk '{print $2}')
+
+  # 3) If the DHCP lease file is unavailable, use a currently known neighbour
+  #    only when it is inside the directly connected subnet and responds.
+  ipcidr="$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk 'NR==1 {print $4}')"
+  if [ -n "$ipcidr" ]; then
+    while read -r gw; do
+      [ -n "$gw" ] || continue
+      if /bin/ping -I "$iface" -c 1 -W 1 "$gw" >/dev/null 2>&1; then
+        printf '%s' "$gw"
+        return 0
+      fi
+    done < <(ip -4 neigh show dev "$iface" 2>/dev/null | awk '$1 ~ /^[0-9]+\./ && $NF != "FAILED" {print $1}')
+
+    # 4) Conservative last resort for common LANs: first usable host (.1), but
+    #    only accept it when it actually answers through this interface.
+    guessed="$(python3 - "$ipcidr" <<'PY2'
+import ipaddress, sys
+try:
+    net = ipaddress.ip_interface(sys.argv[1]).network
+    print(next(net.hosts()))
+except Exception:
+    pass
+PY2
+)"
+    if [ -n "$guessed" ] && /bin/ping -I "$iface" -c 1 -W 1 "$guessed" >/dev/null 2>&1; then
+      printf '%s' "$guessed"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+restore_wired_default_route() {
+  local ip4="" carrier="" current="" gateway=""
+  [ -n "$WIRED_WAN" ] || return 0
+  ip link show "$WIRED_WAN" >/dev/null 2>&1 || return 0
+  carrier="$(cat "/sys/class/net/$WIRED_WAN/carrier" 2>/dev/null || true)"
+  [ "$carrier" = 1 ] || return 0
+  ip4="$(ip -4 -o addr show dev "$WIRED_WAN" scope global 2>/dev/null | awk 'NR==1 {print $4}')"
+  [ -n "$ip4" ] || return 0
+
+  current="$(ip -4 route show default dev "$WIRED_WAN" 2>/dev/null | head -1 || true)"
+  if [ -n "$current" ]; then
+    gateway="$(printf '%s\n' "$current" | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')"
+    [ -n "$gateway" ] && WIRED_GATEWAY_BEFORE="$gateway"
+    return 0
+  fi
+
+  gateway="${WIRED_GATEWAY_BEFORE:-}"
+  if [ -z "$gateway" ]; then
+    gateway="$(discover_wired_gateway "$WIRED_WAN" 2>/dev/null || true)"
+    [ -n "$gateway" ] && WIRED_GATEWAY_BEFORE="$gateway"
+  fi
+
+  if [ -z "$gateway" ]; then
+    warn "Wired WAN $WIRED_WAN has carrier and IPv4 $ip4 but no default route; DHCP gateway could not be discovered."
+    return 0
+  fi
+
+  if ip route replace default via "$gateway" dev "$WIRED_WAN" metric "$WIRED_DEFAULT_METRIC" 2>/dev/null; then
+    log "Ensured wired default route via $gateway dev $WIRED_WAN metric $WIRED_DEFAULT_METRIC; WWAN remains fallback."
+  else
+    warn "Wired WAN $WIRED_WAN has carrier and IPv4 $ip4, but default route via $gateway could not be installed."
+  fi
 }
 
 bearer_ids() {
@@ -2100,7 +2335,11 @@ detect_fm350_transport || true
 MM_AVAILABLE=0
 if [ "$FM350_AVAILABLE" -eq 1 ] && [ "$FM350_TRANSPORT" = usb ] && [ -n "$FM350_RNDIS_IF" ]; then
   log "FM350 USB/RNDIS detected; ModemManager detection is skipped for this transport."
+  fm350_block_modemmanager
 else
+  # No FM350 USB/RNDIS transport: remove a mask left by an earlier FM350 run
+  # so MBIM/QMI/PCIe/other supported modems keep working normally.
+  modemmanager_allow_for_other_modems || true
   discover_mm_modem && MM_AVAILABLE=1
 fi
 if [ "$MM_AVAILABLE" -eq 1 ]; then
@@ -2207,12 +2446,18 @@ if [ "$SUCCESS" -eq 1 ]; then
   # recreates it after every boot or USB re-enumeration.
   if [ "$BACKEND_USED" = at-rndis ] && [ "$MODEM_TRANSPORT" = usb ]; then
     DYNAMIC_WWAN_ROUTE=1
-    ip route replace default via "$GATEWAY" dev "$NET_IF" metric "$((WWAN_ROUTE_DISTANCE * 2))"       || die "Could not install the dynamic FM350 USB default route"
-    log "Installed dynamic FM350 USB route in the running system; it will not be saved to config.boot."
+    # IMPORTANT: never use "ip route replace default" here. "replace" can
+    # remove the already working Ethernet default route. Keep both routes and
+    # make WWAN a real fallback by using a clearly higher metric.
+    ip route del default dev "$NET_IF" 2>/dev/null || true
+    ip route add default via "$GATEWAY" dev "$NET_IF" metric "$WWAN_ROUTE_METRIC" \
+      || die "Could not install the dynamic FM350 USB fallback route"
+    log "Installed dynamic FM350 USB fallback route (metric $WWAN_ROUTE_METRIC); Ethernet routing was left untouched."
   fi
 
   if [ "$NO_SAVE_BACKEND" -eq 0 ]; then cache_write "$BACKEND_CACHE" "$MODEM_KEY" "$BACKEND_USED"; fi
   log "connection aktiv: Backend $BACKEND_USED, Interface $NET_IF, IPv4 ${IP:-PPP}/${PREFIX:-}, Gateway ${GATEWAY:-interface-route}"
+  if [ "$BACKEND_USED" = at-rndis ] && [ "$MODEM_TRANSPORT" = usb ]; then FM350_STABLE_IF="eth1"; fi
 else
   if [ "$WIRED_CANDIDATE_AVAILABLE" -eq 1 ]; then
     BACKEND_USED=none
@@ -2253,8 +2498,7 @@ write_unlock_service_unit() {
   cat > "$UNLOCK_SERVICE_PATH" <<EOF
 [Unit]
 Description=Run modem-specific FCC unlock before the WWAN connection
-After=systemd-modules-load.service systemd-udev-trigger.service ModemManager.service
-Wants=ModemManager.service
+After=systemd-modules-load.service systemd-udev-trigger.service
 Before=modem-connect.service
 StartLimitIntervalSec=0
 
@@ -2276,9 +2520,8 @@ write_service_unit() {
   cat > "$SERVICE_PATH" <<EOF
 [Unit]
 Description=Automatically connect the modem and configure the VyOS WWAN fallback
-After=vyos-router.service systemd-modules-load.service systemd-udev-trigger.service ModemManager.service modem-unlock.service network.target
+After=vyos-router.service systemd-modules-load.service systemd-udev-trigger.service modem-unlock.service network.target
 Requires=vyos-router.service modem-unlock.service
-Wants=ModemManager.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -2295,6 +2538,275 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable modem-unlock.service modem-connect.service >/dev/null 2>&1
+}
+
+write_failover_service_unit() {
+  # Generic WAN failover monitor. It does not know or care whether the modem is
+  # FM350, QMI, MBIM, ModemManager, ECM/NCM/RNDIS or PPP. modem-connect writes
+  # the current modem interface/gateway to ROUTE_CACHE; this monitor only keeps
+  # the routing preference correct. It never resets/reconnects a modem and never
+  # runs a VyOS commit.
+  cat > "$FAILOVER_SCRIPT_PATH" <<'FAILOVER_EOF'
+#!/bin/bash
+set -u
+
+CONFIG_FILE="${CONFIG_FILE:-/etc/modem-connect.conf}"
+ROUTE_CACHE="${ROUTE_CACHE:-/etc/modem-route.conf}"
+WIRED_METRIC="${WIRED_DEFAULT_METRIC:-20}"
+DEFAULT_WWAN_METRIC="${WWAN_ROUTE_METRIC:-200}"
+POLL_SEC="${FAILOVER_POLL_SEC:-2}"
+NOIP_ATTEMPTS="${WWAN_NOIP_ATTEMPTS:-4}"
+RECOVERY_COOLDOWN="${WWAN_RECOVERY_COOLDOWN:-60}"
+noip_count=0
+last_recovery=0
+
+log() { logger -t modem-wan-failover -- "$*"; }
+
+cfg_get() {
+  local f="$1" k="$2"
+  [ -r "$f" ] || return 0
+  sed -n "s/^${k}=//p" "$f" 2>/dev/null | head -1
+}
+
+net_driver() {
+  local iface="$1" p
+  p="$(readlink -f "/sys/class/net/$iface/device/driver" 2>/dev/null || true)"
+  [ -n "$p" ] && basename "$p"
+}
+
+is_modem_like_iface() {
+  local iface="$1" drv
+  case "$iface" in
+    wwan*|wwp*|usb*|rmnet*|ppp*) return 0 ;;
+  esac
+  drv="$(net_driver "$iface")"
+  case "$drv" in
+    rndis_host|cdc_ether|cdc_ncm|cdc_mbim|qmi_wwan|mhi_net|mhi_wwan_ctrl|iosm) return 0 ;;
+  esac
+  return 1
+}
+
+detect_wired() {
+  local configured iface
+  configured="$(cfg_get "$CONFIG_FILE" WIRED_WAN)"
+  case "$configured" in
+    ""|auto)
+      # Prefer eth0 on ROCK 5B, but remain usable on other hardware.
+      if ip link show eth0 >/dev/null 2>&1 && ! is_modem_like_iface eth0; then
+        printf '%s' eth0
+        return 0
+      fi
+      for iface in /sys/class/net/*; do
+        iface="$(basename "$iface")"
+        case "$iface" in eth*|en*) ;; *) continue ;; esac
+        is_modem_like_iface "$iface" && continue
+        [ -e "/sys/class/net/$iface/master" ] && continue
+        printf '%s' "$iface"
+        return 0
+      done
+      ;;
+    none) return 1 ;;
+    *)
+      ip link show "$configured" >/dev/null 2>&1 && printf '%s' "$configured"
+      ;;
+  esac
+}
+
+discover_wired_gateway() {
+  local iface="$1" route gw ipcidr guessed lease
+  route="$(ip -4 route show default dev "$iface" 2>/dev/null | head -1 || true)"
+  gw="$(printf '%s\n' "$route" | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1);exit}}')"
+  [ -n "$gw" ] && { printf '%s' "$gw"; return 0; }
+
+  # Common dhclient / Kea / systemd-networkd lease locations; only accept a
+  # gateway that belongs to the current directly-connected subnet.
+  ipcidr="$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk 'NR==1{print $4}')"
+  [ -n "$ipcidr" ] || return 1
+  for lease in /var/lib/dhcp/dhclient*.leases /run/dhclient*.lease /run/systemd/netif/leases/* /var/lib/NetworkManager/*.lease; do
+    [ -r "$lease" ] || continue
+    gw="$(grep -Eho '(^|[ ;])(routers|ROUTER|gateway)[ =:]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$lease" 2>/dev/null | grep -Eo '[0-9]+(\.[0-9]+){3}' | tail -1)"
+    [ -n "$gw" ] || continue
+    python3 - "$ipcidr" "$gw" <<'PY' >/dev/null 2>&1 && { printf '%s' "$gw"; return 0; }
+import ipaddress,sys
+raise SystemExit(0 if ipaddress.ip_address(sys.argv[2]) in ipaddress.ip_interface(sys.argv[1]).network else 1)
+PY
+  done
+
+  # Last resort for typical LANs: try the first host, but only if reachable.
+  guessed="$(python3 - "$ipcidr" <<'PY'
+import ipaddress,sys
+try:
+    print(next(ipaddress.ip_interface(sys.argv[1]).network.hosts()))
+except Exception:
+    pass
+PY
+)"
+  if [ -n "$guessed" ] && ping -I "$iface" -c 1 -W 1 "$guessed" >/dev/null 2>&1; then
+    printf '%s' "$guessed"
+    return 0
+  fi
+  return 1
+}
+
+ensure_wwan_route() {
+  local iface gw method metric ip4
+  iface="$(cfg_get "$ROUTE_CACHE" INTERFACE)"
+  gw="$(cfg_get "$ROUTE_CACHE" GATEWAY)"
+  method="$(cfg_get "$ROUTE_CACHE" IP_METHOD)"
+  metric="$(cfg_get "$ROUTE_CACHE" WWAN_METRIC)"
+  [ -n "$metric" ] || metric="$DEFAULT_WWAN_METRIC"
+  [ -n "$iface" ] || return 0
+  ip link show "$iface" >/dev/null 2>&1 || return 0
+
+  case "$method" in
+    ppp)
+      if ! ip -4 route show default dev "$iface" 2>/dev/null | grep -q '^default '; then
+        ip route add default dev "$iface" metric "$metric" 2>/dev/null && log "WWAN fallback restored: $iface metric $metric"
+      fi
+      ;;
+    *)
+      ip4="$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk 'NR==1{print $4}')"
+      [ -n "$ip4" ] || return 0
+      [ -n "$gw" ] || return 0
+      if ! ip -4 route show default dev "$iface" 2>/dev/null | grep -Fq "via $gw"; then
+        # add, never replace: replacing could delete the wired default route.
+        ip route add default via "$gw" dev "$iface" metric "$metric" 2>/dev/null && \
+          log "WWAN fallback restored: via $gw dev $iface metric $metric"
+      fi
+      ;;
+  esac
+}
+
+check_wwan_liveness() {
+  local iface ip4 now service_state service_pid
+  iface="$(cfg_get "$ROUTE_CACHE" INTERFACE)"
+  [ -n "$iface" ] || { noip_count=0; return 0; }
+
+  # If the cached interface temporarily disappears, udev recovery may already be
+  # handling it. Count it the same way, but never react to a single observation.
+  if ! ip link show "$iface" >/dev/null 2>&1; then
+    noip_count=$((noip_count + 1))
+  else
+    ip4="$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk 'NR==1{print $4}')"
+    if [ -n "$ip4" ]; then
+      noip_count=0
+      return 0
+    fi
+    noip_count=$((noip_count + 1))
+  fi
+
+  [ "$noip_count" -lt "$NOIP_ATTEMPTS" ] && return 0
+
+  now="$(date +%s)"
+  if [ $((now - last_recovery)) -lt "$RECOVERY_COOLDOWN" ]; then
+    return 0
+  fi
+
+  # Do not interrupt an already running modem-connect attempt. Type=oneshot
+  # is ActiveState=activating while CEREG/PDP recovery is in progress; v5.1
+  # accidentally killed that attempt before its controlled radio reset.
+  service_state="$(systemctl show modem-connect.service -p ActiveState --value 2>/dev/null || true)"
+  service_pid="$(systemctl show modem-connect.service -p MainPID --value 2>/dev/null || true)"
+  if [ "$service_state" = "activating" ] || { [ -n "$service_pid" ] && [ "$service_pid" != "0" ]; }; then
+    [ $((noip_count % 10)) -eq 0 ] &&       log "WWAN $iface still has no IPv4, but modem-connect is already running; leaving the current recovery attempt untouched."
+    return 0
+  fi
+
+  log "WWAN $iface has had no IPv4 address for $noip_count consecutive checks; requesting one controlled modem reconnect."
+  last_recovery="$now"
+  noip_count=0
+
+  # Generic path: restart the completed/idle normal modem connection service.
+  # This remains modem-agnostic; the connection script selects MM/QMI/MBIM/
+  # RNDIS/PPP as appropriate. --no-block avoids a circular wait.
+  systemctl restart --no-block modem-connect.service >/dev/null 2>&1 || true
+}
+
+reconcile_wired() {
+  local iface carrier ip4 gw
+  iface="$(detect_wired 2>/dev/null || true)"
+  [ -n "$iface" ] || return 0
+  carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || true)"
+  ip4="$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk 'NR==1{print $4}')"
+
+  if [ "$carrier" != 1 ] || [ -z "$ip4" ]; then
+    # Do not leave a stale low-metric route pointing at an unplugged WAN.
+    if ip -4 route show default dev "$iface" 2>/dev/null | grep -q '^default '; then
+      ip route del default dev "$iface" 2>/dev/null || true
+      log "Wired WAN unavailable: removed stale default route on $iface; WWAN may take over."
+    fi
+    return 0
+  fi
+
+  # Cable + IPv4: wired must be primary.
+  if ! ip -4 route show default dev "$iface" 2>/dev/null | grep -q '^default '; then
+    gw="$(discover_wired_gateway "$iface" 2>/dev/null || true)"
+    if [ -n "$gw" ]; then
+      ip route add default via "$gw" dev "$iface" metric "$WIRED_METRIC" 2>/dev/null && \
+        log "Wired WAN restored: via $gw dev $iface metric $WIRED_METRIC"
+    fi
+  else
+    # Normalize only the route on the wired device; never touch WWAN.
+    gw="$(ip -4 route show default dev "$iface" | awk 'NR==1{for(i=1;i<=NF;i++)if($i=="via"){print $(i+1);exit}}')"
+    if [ -n "$gw" ] && ! ip -4 route show default dev "$iface" | grep -q "metric $WIRED_METRIC\\b"; then
+      ip route del default dev "$iface" 2>/dev/null || true
+      ip route add default via "$gw" dev "$iface" metric "$WIRED_METRIC" 2>/dev/null || true
+    fi
+  fi
+}
+
+last=""
+while :; do
+  ensure_wwan_route
+  check_wwan_liveness
+  reconcile_wired
+
+  # Log only state changes, not every polling cycle.
+  now="$(ip -4 route show default 2>/dev/null | tr '\n' ';')"
+  if [ "$now" != "$last" ]; then
+    log "Default routes: ${now:-none}"
+    last="$now"
+  fi
+  sleep "$POLL_SEC"
+done
+FAILOVER_EOF
+  chmod 0755 "$FAILOVER_SCRIPT_PATH"
+
+  cat > "$FAILOVER_SERVICE_PATH" <<EOF
+[Unit]
+Description=Keep wired WAN primary and modem WAN as automatic fallback
+After=vyos-router.service network.target
+Requires=vyos-router.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=$FAILOVER_SCRIPT_PATH
+Restart=always
+RestartSec=2
+Environment=CONFIG_FILE=$CONFIG_FILE
+Environment=ROUTE_CACHE=$ROUTE_CACHE
+Environment=WIRED_DEFAULT_METRIC=$WIRED_DEFAULT_METRIC
+Environment=WWAN_ROUTE_METRIC=$WWAN_ROUTE_METRIC
+Environment=FAILOVER_POLL_SEC=$FAILOVER_POLL_SEC
+Environment=WWAN_NOIP_ATTEMPTS=$WWAN_NOIP_ATTEMPTS
+Environment=WWAN_RECOVERY_COOLDOWN=$WWAN_RECOVERY_COOLDOWN
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "$FAILOVER_SERVICE_PATH"
+  systemctl daemon-reload
+  systemctl enable modem-wan-failover.service >/dev/null 2>&1 || true
+
+  # IMPORTANT: do not synchronously restart this service here. modem-connect can
+  # itself be running as a systemd oneshot; waiting for another unit that used to
+  # depend on modem-connect caused a circular wait/hang. Start/restart detached.
+  if systemctl is-active --quiet modem-wan-failover.service; then
+    systemctl restart --no-block modem-wan-failover.service >/dev/null 2>&1 || true
+  else
+    systemctl start --no-block modem-wan-failover.service >/dev/null 2>&1 || true
+  fi
 }
 
 # Determine wired WAN. Modem and tethering interfaces are intentionally excluded.
@@ -2386,19 +2898,8 @@ source /opt/vyatta/etc/functions/script-template
 configure
 EOF
 
-printf 'delete nat source rule %q 2>/dev/null || true\n' "$WIRED_NAT_RULE" >> "$VYOS_CONFIG_HELPER"
-if [ "$WIRED_CONFIGURED" -eq 1 ]; then
-  [ "$WIRED_ADD_DHCP" -eq 1 ] && printf 'set interfaces ethernet %q address dhcp\n' "$WIRED_WAN" >> "$VYOS_CONFIG_HELPER"
-  if [ "$WIRED_USE_DHCP" -eq 1 ]; then
-    printf 'delete interfaces ethernet %q dhcp-options default-route-distance 2>/dev/null || true\n' "$WIRED_WAN" >> "$VYOS_CONFIG_HELPER"
-    printf 'set interfaces ethernet %q dhcp-options default-route-distance %q\n' "$WIRED_WAN" "$WIRED_ROUTE_DISTANCE" >> "$VYOS_CONFIG_HELPER"
-  fi
-  printf 'set nat source rule %q description %q\n' "$WIRED_NAT_RULE" 'AP-NET-to-WIRED-WAN' >> "$VYOS_CONFIG_HELPER"
-  printf 'set nat source rule %q outbound-interface name %q\n' "$WIRED_NAT_RULE" "$WIRED_WAN" >> "$VYOS_CONFIG_HELPER"
-  printf 'set nat source rule %q source address %q\n' "$WIRED_NAT_RULE" "$AP_NET" >> "$VYOS_CONFIG_HELPER"
-  printf 'set nat source rule %q translation address masquerade\n' "$WIRED_NAT_RULE" >> "$VYOS_CONFIG_HELPER"
-fi
-
+# Ethernet/AP/DHCP/NAT are owned by ap-dhcp-wan-setup.sh.
+# Do not delete, recreate, commit or otherwise touch the wired WAN here.
 printf 'delete nat source rule %q 2>/dev/null || true\n' "$WWAN_NAT_RULE" >> "$VYOS_CONFIG_HELPER"
 if [ "$WWAN_CONNECTED" -eq 1 ]; then
   printf 'set nat source rule %q description %q\n' "$WWAN_NAT_RULE" 'AP-NET-to-WWAN' >> "$VYOS_CONFIG_HELPER"
@@ -2454,10 +2955,8 @@ vyos_desired_config_active() {
     printf '%s\n' "$active_cfg" | grep -Fq "set nat source rule $WWAN_NAT_RULE " && nat_ok=0
     [ -n "$OLD_GATEWAY" ] && printf '%s\n' "$active_cfg" | grep -Fq "set protocols static route 0.0.0.0/0 next-hop $OLD_GATEWAY" && route_cfg_ok=0
   fi
-  if [ "$WIRED_CONFIGURED" -eq 1 ]; then
-    wired_ok=0
-    printf '%s\n' "$active_cfg" | grep -F "set nat source rule $WIRED_NAT_RULE outbound-interface name" | grep -Fq "$WIRED_WAN" && wired_ok=1
-  fi
+  # Wired WAN configuration is intentionally outside this script.
+  wired_ok=1
   [ "$nat_ok" -eq 1 ] && [ "$route_cfg_ok" -eq 1 ] && [ "$wired_ok" -eq 1 ]
 }
 
@@ -2486,6 +2985,11 @@ rm -f "$VYOS_CONFIG_HELPER" "$VYOS_CONFIG_RESULT"
 
 [ "$COMMIT_OK" -eq 1 ] || die "VyOS configuration could not be committed and saved after $VYOS_COMMIT_RETRIES attempts."
 
+# A VyOS commit can briefly remove the DHCP-installed Ethernet default route.
+# If Ethernet was working before the modem setup and the cable/IP are still
+# present, restore that exact gateway immediately. WWAN remains metric 200.
+restore_wired_default_route
+
 CONFIG_ACTIVE=0
 for VERIFY_ATTEMPT in 1 2 3 4 5 6 7 8 9 10; do
   ACTIVE_CFG="$(/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands 2>/dev/null || true)"
@@ -2499,10 +3003,8 @@ for VERIFY_ATTEMPT in 1 2 3 4 5 6 7 8 9 10; do
       ip -4 route show default dev "$NET_IF" | grep -Fq "via $GATEWAY" && ROUTE_CFG_OK=1
     elif printf '%s\n' "$ACTIVE_CFG" | grep -Fq "set protocols static route 0.0.0.0/0 next-hop $GATEWAY"; then ROUTE_CFG_OK=1; fi
   fi
-  if [ "$WIRED_CONFIGURED" -eq 1 ]; then
-    WIRED_OK=0
-    printf '%s\n' "$ACTIVE_CFG" | grep -F "set nat source rule $WIRED_NAT_RULE outbound-interface name" | grep -Fq "$WIRED_WAN" && WIRED_OK=1
-  fi
+  # Wired WAN configuration is intentionally outside this script.
+  WIRED_OK=1
   if [ "$NAT_OK" -eq 1 ] && [ "$ROUTE_CFG_OK" -eq 1 ] && [ "$WIRED_OK" -eq 1 ]; then CONFIG_ACTIVE=1; break; fi
   [ "$VERIFY_ATTEMPT" -eq 1 ] && warn "Commit succeeded; waiting for the active configuration (WWAN-NAT=$NAT_OK WWAN-Route-Konfig=$ROUTE_CFG_OK WIRED=$WIRED_OK)."
   sleep 2
@@ -2529,6 +3031,7 @@ if [ "$WWAN_CONNECTED" -eq 1 ]; then
 fi
 
 if [ "$WIRED_CONFIGURED" -eq 1 ]; then
+  restore_wired_default_route
   WIRED_IP="$(ip -4 -o addr show dev "$WIRED_WAN" scope global 2>/dev/null | awk 'NR==1 {print $4}')"
   WIRED_ROUTE="$(ip -4 route show default dev "$WIRED_WAN" 2>/dev/null | head -1 || true)"
   if [ -n "$WIRED_IP" ] && [ -n "$WIRED_ROUTE" ]; then
@@ -2542,18 +3045,21 @@ cat > "$ROUTE_CACHE" <<EOF
 GATEWAY=${GATEWAY:-}
 INTERFACE=${NET_IF:-}
 BACKEND=$BACKEND_USED
+IP_METHOD=${IP_METHOD:-}
+WWAN_METRIC=${WWAN_ROUTE_METRIC:-200}
 EOF
 chmod 600 "$ROUTE_CACHE"
 
 write_persistent_config
 write_unlock_service_unit
 write_service_unit
+write_failover_service_unit
 
 if [ "$WIRED_CONFIGURED" -eq 1 ]; then
   if [ "$WWAN_CONNECTED" -eq 1 ]; then
-    log "Wired WAN active: $WIRED_WAN, Distanz $WIRED_ROUTE_DISTANCE; WWAN $NET_IF remains the fallback with distance $WWAN_ROUTE_DISTANCE."
+    log "Wired WAN is managed by the AP/WAN setup; WWAN $NET_IF is installed only as fallback (runtime metric ${WWAN_ROUTE_METRIC:-n/a})."
   else
-    log "Wired WAN active: $WIRED_WAN; WWAN is currently unavailable (for example, no SIM or no registration)."
+    log "Wired WAN is managed externally; WWAN is currently unavailable (for example, no SIM or no registration)."
   fi
 else
   log "No wired WAN is configured; WWAN is the only Internet path."
@@ -2563,7 +3069,6 @@ if [ "$WWAN_CONNECTED" -eq 1 ]; then
 else
   log "PASS: Ethernet=$WIRED_WAN active; WWAN is not connected, but configuration and autostart were installed."
 fi
-log "Autostart enabled: modem-unlock.service -> modem-connect.service; selection/APN saved in $CONFIG_FILE."
+log "Autostart enabled: modem-unlock.service -> modem-connect.service; FM350 USB/RNDIS hard-isolates ModemManager (mask + udev ignore), while other modems may start it on demand; recovery remains udev/event-driven; selection/APN saved in $CONFIG_FILE."
 ip -4 route show default
 builtin exit 0
-

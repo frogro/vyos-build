@@ -1,6 +1,7 @@
 #!/bin/vbash
 #
 # Configure locale, time zone, DNS, NTP, and wireless regulatory domain on VyOS.
+# Optimized: persistent C.UTF-8 is applied even when no VyOS config changes are needed.
 #
 # Run as the "vyos" user:
 #   chmod +x /home/vyos/set-locales.sh
@@ -105,34 +106,38 @@ echo '=== Proposed changes ==='
 CHANGES="$(compare 2>/dev/null || true)"
 printf '%s\n' "$CHANGES"
 
+NO_CONFIG_CHANGES=0
 if [ -z "$CHANGES" ] || printf '%s\n' "$CHANGES" | grep -q '^No changes between working and active configurations\.$'; then
     discard 2>/dev/null || true
     exit
-    echo 'No configuration changes were required.'
-    builtin exit 0
-fi
-echo
-
-if ! ask_yes_no 'Commit and save? An active access point may restart briefly.' 'y'; then
-    discard
-    echo 'Cancelled; no changes were applied.'
-    builtin exit 0
+    NO_CONFIG_CHANGES=1
+    echo 'No VyOS configuration changes were required.'
+else
+    echo
 fi
 
-if ! commit; then
-    echo 'ERROR: Commit failed; discarding changes.' >&2
-    discard
-    builtin exit 1
-fi
+if [ "$NO_CONFIG_CHANGES" -eq 0 ]; then
+    if ! ask_yes_no 'Commit and save? An active access point may restart briefly.' 'y'; then
+        discard
+        echo 'Cancelled; no changes were applied.'
+        builtin exit 0
+    fi
 
-if ! save; then
-    echo 'ERROR: Save failed.' >&2
-    discard 2>/dev/null || true
-    builtin exit 1
-fi
+    if ! commit; then
+        echo 'ERROR: Commit failed; discarding changes.' >&2
+        discard
+        builtin exit 1
+    fi
 
-# End the VyOS configuration session before restarting system services.
-exit
+    if ! save; then
+        echo 'ERROR: Save failed.' >&2
+        discard 2>/dev/null || true
+        builtin exit 1
+    fi
+
+    # Leave VyOS configuration mode; script execution continues.
+    exit
+fi
 
 echo
 echo 'Persisting the system locale as C.UTF-8...'

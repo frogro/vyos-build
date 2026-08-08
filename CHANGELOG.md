@@ -4,6 +4,44 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v2026.08.08-rock5b] - 2026-08-08
+
+Updated ROCK 5B build with the DWC3/USB3 host fix and the latest tested networking helpers.
+
+### Changed
+
+- Updated the Armbian ROCK 5B boot/kernel base to `7.1.7-edge-rockchip64`.
+- Switched the build workflow default base-layer release to `armbian-rock5b-dwc3-fix`.
+- Added checksum verification for the downloaded Armbian base image during the GitHub Actions build.
+- Updated `ap-dhcp-wan-setup.sh` to reproduce the known-good AP/DHCP/DNS/firewall configuration and keep Ethernet as the preferred WAN.
+- Updated `modem-connect.sh` to the tested v5.3 ROCK 5B variant with native FM350 USB/RNDIS `eth1`, Ethernet metric preference, WWAN metric 200 fallback, event-driven recovery, and FM350-specific ModemManager isolation.
+- Updated `set-locales.sh` so persistent `C.UTF-8` system locale handling is also applied when no VyOS configuration changes are required.
+
+### Fixed
+
+- Restored xHCI/DWC3 USB3 host support on the ROCK 5B; SuperSpeed devices can enumerate at 5 Gbit/s instead of falling back to the EHCI USB2 path.
+- Prevented legacy `wwanusb0` rename state from taking ownership of the FM350 RNDIS interface on the ROCK 5B.
+- Prevented the WWAN failover monitor from interrupting an already running modem reconnect/registration attempt.
+- Prevented ModemManager from probing the FM350 while it is managed through the dedicated USB AT/RNDIS backend, without disabling ModemManager support for other modem types.
+- Added explicit AP DNS forwarding and forward-chain rules matching the tested stable `config.boot` layout.
+
+### Build
+
+- The workflow now verifies the Armbian base-layer `SHA256SUMS`.
+- The workflow now generates and uploads `SHA256SUMS` together with `vyos-rock5b-fresh.img.xz`.
+- Release image SHA256 is recorded in the release `SHA256SUMS` asset.
+
+## [armbian-rock5b-dwc3-fix] - 2026-08-08
+
+Updated base-layer release; not a flashable VyOS image on its own.
+
+### Changed
+
+- Updated the ROCK 5B Armbian edge kernel from `7.1.3-edge-rockchip64` to `7.1.7-edge-rockchip64`.
+- Added the DWC3 dual-role/host fix required for xHCI USB3 SuperSpeed host operation on the tested ROCK 5B USB3 path.
+- Added a `SHA256SUMS` release asset for integrity verification.
+
+
 ## [v2026.08.07-rock5b] - 2026-08-07
 
 Updated community build with improved modem handling, locale initialization, and image security.
