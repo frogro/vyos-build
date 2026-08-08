@@ -232,7 +232,7 @@ dmesg
 
 #### Tested and confirmed working
 
-- Fibocom FM350-GL, including automatic FCC unlock over the AT port
+- Fibocom FM350-GL (Revision: 81600.0000.00.29.24.02,  SVN: 10), including automatic FCC unlock over the AT port
 
 #### Expected to work with compatible drivers and firmware
 
