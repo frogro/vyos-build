@@ -4,43 +4,30 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [v2026.08.08-rock5b] - 2026-08-08
+## [Rolling update 2026-08-10] - 2026-08-10
 
-Updated ROCK 5B build with the DWC3/USB3 host fix and the latest tested networking helpers.
+### Cellular / WWAN
 
-### Changed
+- Updated `modem-connect.sh` from v5.9 to v5.17.
+- Unified WWAN fallback priority: persistent VyOS WWAN routes use distance 200 and dynamic Linux WWAN routes use metric 200, while the wired WAN remains preferred.
+- Persistent WWAN route validation now checks the configured VyOS distance so stale distance-10 configurations are corrected.
+- Added improved RM505Q-AE PCIe/MHI handling through ModemManager, including registration/state recovery and usable-bearer validation.
+- Existing ModemManager bearers are reused only when the bearer is usable and its bound WWAN data path is alive.
+- Added detection and recovery of ghost/stale bearers where ModemManager reports a connected bearer but the bound data path is dead.
+- Ghost-bearer teardown now immediately creates a fresh bearer in the same service invocation, protected by a one-time reconnect re-entry guard.
+- Added staged handling for stuck `connecting` / `disconnecting` states and MBIM `Protocol.NotOpened` failures.
+- Preserved the dedicated staged FM350 USB/RNDIS recovery path and removed obsolete FM350 recovery artifacts when another modem type is selected.
+- Corrected FM350 runtime-repair fallback so Linux WWAN routes use `WWAN_ROUTE_METRIC` rather than the persistent-route distance value.
+- Fixed the ModemManager always-connected guard for systemd `Type=oneshot` services with `RemainAfterExit=yes`: `active (exited)` with `MainPID=0` is now treated as completed/idle rather than as an active recovery transaction.
 
-- Updated the Armbian ROCK 5B boot/kernel base to `7.1.7-edge-rockchip64`.
-- Switched the build workflow default base-layer release to `armbian-rock5b-dwc3-fix`.
-- Added checksum verification for the downloaded Armbian base image during the GitHub Actions build.
-- Updated `ap-dhcp-wan-setup.sh` to reproduce the known-good AP/DHCP/DNS/firewall configuration and keep Ethernet as the preferred WAN.
-- Updated `modem-connect.sh` to the tested v5.3 ROCK 5B variant with native FM350 USB/RNDIS `eth1`, Ethernet metric preference, WWAN metric 200 fallback, event-driven recovery, and FM350-specific ModemManager isolation.
-- Updated `set-locales.sh` so persistent `C.UTF-8` system locale handling is also applied when no VyOS configuration changes are required.
+### Validation
 
-### Fixed
-
-- Restored xHCI/DWC3 USB3 host support on the ROCK 5B; SuperSpeed devices can enumerate at 5 Gbit/s instead of falling back to the EHCI USB2 path.
-- Prevented legacy `wwanusb0` rename state from taking ownership of the FM350 RNDIS interface on the ROCK 5B.
-- Prevented the WWAN failover monitor from interrupting an already running modem reconnect/registration attempt.
-- Prevented ModemManager from probing the FM350 while it is managed through the dedicated USB AT/RNDIS backend, without disabling ModemManager support for other modem types.
-- Added explicit AP DNS forwarding and forward-chain rules matching the tested stable `config.boot` layout.
-
-### Build
-
-- The workflow now verifies the Armbian base-layer `SHA256SUMS`.
-- The workflow now generates and uploads `SHA256SUMS` together with `vyos-rock5b-fresh.img.xz`.
-- Release image SHA256 is recorded in the release `SHA256SUMS` asset.
-
-## [armbian-rock5b-dwc3-fix] - 2026-08-08
-
-Updated base-layer release; not a flashable VyOS image on its own.
-
-### Changed
-
-- Updated the ROCK 5B Armbian edge kernel from `7.1.3-edge-rockchip64` to `7.1.7-edge-rockchip64`.
-- Added the DWC3 dual-role/host fix required for xHCI USB3 SuperSpeed host operation on the tested ROCK 5B USB3 path.
-- Added a `SHA256SUMS` release asset for integrity verification.
-
+- RM505Q-AE fast reconnect regression test passed with `modem-connect.service` and `modem-unlock.service` both deliberately in `active (exited)`, `MainPID=0`.
+- An explicit ModemManager disconnect changed Bearer/8 to Bearer/9 and restored the connection in approximately 6 seconds.
+- Recovery was triggered by the intended `Always-connected policy`, rather than waiting for the slower data-path fallback.
+- The recovered `wwan0` data path passed bound ICMP testing and the final Linux default route used metric 200.
+- Persistent VyOS WWAN routing was verified with distance 200.
+- `modem-connect.sh` passes `bash -n` syntax validation.
 
 ## [Rolling update 2026-08-09] - 2026-08-09
 
@@ -90,6 +77,44 @@ Updated ROCK 5B community image with improved 5 GHz Wi-Fi configuration, USB mod
 ### Image
 - ROCK 5B flashable image built from the `rolling` branch.
 - SHA256 checksum is supplied with the release assets.
+
+## [v2026.08.08-rock5b] - 2026-08-08
+
+Updated ROCK 5B build with the DWC3/USB3 host fix and the latest tested networking helpers.
+
+### Changed
+
+- Updated the Armbian ROCK 5B boot/kernel base to `7.1.7-edge-rockchip64`.
+- Switched the build workflow default base-layer release to `armbian-rock5b-dwc3-fix`.
+- Added checksum verification for the downloaded Armbian base image during the GitHub Actions build.
+- Updated `ap-dhcp-wan-setup.sh` to reproduce the known-good AP/DHCP/DNS/firewall configuration and keep Ethernet as the preferred WAN.
+- Updated `modem-connect.sh` to the tested v5.3 ROCK 5B variant with native FM350 USB/RNDIS `eth1`, Ethernet metric preference, WWAN metric 200 fallback, event-driven recovery, and FM350-specific ModemManager isolation.
+- Updated `set-locales.sh` so persistent `C.UTF-8` system locale handling is also applied when no VyOS configuration changes are required.
+
+### Fixed
+
+- Restored xHCI/DWC3 USB3 host support on the ROCK 5B; SuperSpeed devices can enumerate at 5 Gbit/s instead of falling back to the EHCI USB2 path.
+- Prevented legacy `wwanusb0` rename state from taking ownership of the FM350 RNDIS interface on the ROCK 5B.
+- Prevented the WWAN failover monitor from interrupting an already running modem reconnect/registration attempt.
+- Prevented ModemManager from probing the FM350 while it is managed through the dedicated USB AT/RNDIS backend, without disabling ModemManager support for other modem types.
+- Added explicit AP DNS forwarding and forward-chain rules matching the tested stable `config.boot` layout.
+
+### Build
+
+- The workflow now verifies the Armbian base-layer `SHA256SUMS`.
+- The workflow now generates and uploads `SHA256SUMS` together with `vyos-rock5b-fresh.img.xz`.
+- Release image SHA256 is recorded in the release `SHA256SUMS` asset.
+
+## [armbian-rock5b-dwc3-fix] - 2026-08-08
+
+Updated base-layer release; not a flashable VyOS image on its own.
+
+### Changed
+
+- Updated the ROCK 5B Armbian edge kernel from `7.1.3-edge-rockchip64` to `7.1.7-edge-rockchip64`.
+- Added the DWC3 dual-role/host fix required for xHCI USB3 SuperSpeed host operation on the tested ROCK 5B USB3 path.
+- Added a `SHA256SUMS` release asset for integrity verification.
+
 ## [v2026.08.07-rock5b] - 2026-08-07
 
 Updated community build with improved modem handling, locale initialization, and image security.
@@ -126,7 +151,6 @@ Updated community build with improved modem handling, locale initialization, and
 - The ROCK 5B continues to boot with the Armbian `7.1.3-edge-rockchip64` kernel supplied by the ROCK 5B boot layer; the VyOS kernel package in the root filesystem is separate.
 - Release image SHA256:
   `511a266f1498efa15c5502b14392db89366425a8603bf9294f72ad541738b0a3`
-
 
 ## [v2026.08.05-rock5b] - 2026-08-05
 

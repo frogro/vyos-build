@@ -1,6 +1,6 @@
 #!/bin/vbash
-# Optimized ROCK 5B variant v5.9: fast boot completion, persistent-config/runtime-route separation, and correct WWAN metric repair.
-# FM350 USB uses native eth1 on ROCK 5B; dynamic RNDIS routes are treated as runtime state, so VyOS commit verification no longer waits on or fails because of them.
+# Optimized ROCK 5B variant v5.17: retain v5.16 ghost-bearer recovery and fix RM505Q always-connected handling after completed oneshot services.
+# active/exited modem-connect/modem-unlock units with MainPID=0 are treated as completed/idle, so a missing ModemManager bearer can trigger the fast reconnect path instead of waiting for the slower data-path fallback.
 #
 # modem-connect.sh
 # Universal modem setup for VyOS on ROCK 5B.
@@ -36,9 +36,11 @@ AP_IF_CACHE="${AP_IF_CACHE:-/etc/photobooth-ap-interface.conf}"
 AP_GATEWAY="${AP_GATEWAY:-10.3.141.50}"
 AP_NET="${AP_NET:-10.3.141.0/24}"
 WIRED_ROUTE_DISTANCE="${WIRED_ROUTE_DISTANCE:-1}"
-WWAN_ROUTE_DISTANCE="${WWAN_ROUTE_DISTANCE:-10}"
-# Linux runtime metric for dynamic USB/RNDIS default route. It must be
-# clearly worse than the Ethernet DHCP default route (normally metric 20).
+WWAN_ROUTE_DISTANCE="${WWAN_ROUTE_DISTANCE:-200}"
+# Unified WWAN fallback policy:
+# - persistent VyOS static WWAN routes use distance 200
+# - dynamic Linux USB/RNDIS routes use metric 200
+# Both are intentionally less preferred than the normal wired WAN.
 WWAN_ROUTE_METRIC="${WWAN_ROUTE_METRIC:-200}"
 WWAN_NAT_RULE="${WWAN_NAT_RULE:-160}"
 WIRED_NAT_RULE="${WIRED_NAT_RULE:-100}"
@@ -119,8 +121,17 @@ FM350_RECOVERY_HEALTH_TRIES="${FM350_RECOVERY_HEALTH_TRIES:-4}"
 FM350_RECOVERY_HEALTH_INTERVAL="${FM350_RECOVERY_HEALTH_INTERVAL:-2}"
 FM350_RNDIS_REBIND_WAIT="${FM350_RNDIS_REBIND_WAIT:-20}"
 WWAN_DATA_HEALTH_INTERVAL="${WWAN_DATA_HEALTH_INTERVAL:-15}"
-WWAN_DATA_HEALTH_FAILURES="${WWAN_DATA_HEALTH_FAILURES:-2}"
+WWAN_DATA_HEALTH_FAILURES="${WWAN_DATA_HEALTH_FAILURES:-3}"
 WWAN_DATA_HEALTH_TARGET="${WWAN_DATA_HEALTH_TARGET:-1.1.1.1}"
+WWAN_DATA_HEALTH_PINGS="${WWAN_DATA_HEALTH_PINGS:-3}"
+MM_ALWAYS_CONNECTED="${MM_ALWAYS_CONNECTED:-1}"
+MM_STATE_FAILURES="${MM_STATE_FAILURES:-2}"
+MM_STUCK_CONNECT_WAIT="${MM_STUCK_CONNECT_WAIT:-30}"
+RM505Q_REDISCOVERY_WAIT="${RM505Q_REDISCOVERY_WAIT:-90}"
+MM_BEARER_HEALTH_TARGET="${MM_BEARER_HEALTH_TARGET:-1.1.1.1}"
+MM_BEARER_HEALTH_PINGS="${MM_BEARER_HEALTH_PINGS:-3}"
+MM_BEARER_HEALTH_TIMEOUT="${MM_BEARER_HEALTH_TIMEOUT:-2}"
+MM_GHOST_RECONNECT_REENTRY="${MM_GHOST_RECONNECT_REENTRY:-0}"
 VYOS_COMMIT_RETRIES="${VYOS_COMMIT_RETRIES:-6}"
 VYOS_COMMIT_RETRY_DELAY="${VYOS_COMMIT_RETRY_DELAY:-10}"
 
@@ -283,7 +294,10 @@ if [ "$SERVICE_RUN" -eq 0 ] && [ "$RECOVER_ONLY" -eq 0 ] && [ "$UNLOCK_ONLY" -eq
   systemctl stop modem-unlock.service >/dev/null 2>&1 || true
   systemctl stop modem-wan-failover.service >/dev/null 2>&1 || true
   systemctl disable --now modem-connect-recover.timer >/dev/null 2>&1 || true
-  rm -f "$FM350_RECOVERY_TIMER_PATH"
+  # The recovery unit is FM350-USB specific. Remove an older copy while an
+  # interactive install is taking ownership; it will be recreated only if the
+  # selected modem is actually an FM350 USB/RNDIS device.
+  rm -f "$FM350_RECOVERY_TIMER_PATH" "$FM350_RECOVERY_SERVICE_PATH"
 fi
 rm -f "$FM350_LINK_FILE" "$FM350_UDEV_RULE" 2>/dev/null || true
 
@@ -520,7 +534,7 @@ ensure_modem_device_discovery() {
     chmod 0644 "$THUNDERBOLT_MODULES_FILE"
 
     cat > "$THUNDERBOLT_UDEV_RULE" <<'EOF'
-# Von modem-connect-universal-v5.9 verwaltet.
+# Von modem-connect-universal-v5.17 verwaltet.
 # Autorisiert jedes externe Thunderbolt-/USB4-device automatisch.
 ACTION=="add", SUBSYSTEM=="thunderbolt", ATTR{authorized}=="0", ATTR{authorized}="1"
 ACTION=="change", SUBSYSTEM=="thunderbolt", ATTR{authorized}=="0", ATTR{authorized}="1"
@@ -695,6 +709,18 @@ fm350_set_usb_power() {
 }
 
 # startet die connection nach einer USB-Neuanmeldung automatisch neu.
+fm350_remove_usb_recovery_artifacts() {
+  # These objects are useful only for the FM350 USB/RNDIS composition.
+  # Leaving them behind after switching to an MHI/PCIe modem caused a stale
+  # modem-connect-recover.service to spend 120s waiting for a non-existent FM350.
+  systemctl disable --now modem-connect-recover.timer >/dev/null 2>&1 || true
+  systemctl stop modem-connect-recover.service >/dev/null 2>&1 || true
+  rm -f "$FM350_RECOVERY_TIMER_PATH" "$FM350_RECOVERY_SERVICE_PATH" \
+        "$FM350_UDEV_RULE" "$FM350_MM_IGNORE_RULE" "$FM350_LINK_FILE"
+  udevadm control --reload-rules 2>/dev/null || true
+  systemctl daemon-reload
+}
+
 fm350_install_rndis_recovery() {
   local current mac
   [ "$FM350_TRANSPORT" = usb ] || return 0
@@ -1018,7 +1044,9 @@ fm350_recovery_runtime_repair() {
   mtu="$(fm350_route_cache_get MTU)"
   metric="$(fm350_route_cache_get WWAN_METRIC)"
   saved_devnum="$(fm350_route_cache_get USB_DEVNUM)"
-  [ -n "$metric" ] || metric="$WWAN_ROUTE_DISTANCE"
+  # FM350 recovery repairs a Linux runtime route; fall back to the runtime
+  # route metric, not the persistent VyOS administrative-distance value.
+  [ -n "$metric" ] || metric="$WWAN_ROUTE_METRIC"
   [ -n "$iface" ] || iface="eth1"
 
   ip link show "$iface" >/dev/null 2>&1 || return 1
@@ -1364,7 +1392,7 @@ fm350_query_identity() {
 fm350_install_mm_ignore_rule() {
   mkdir -p "$(dirname "$FM350_MM_IGNORE_RULE")"
   cat > "$FM350_MM_IGNORE_RULE" <<'EOF'
-# Managed by modem-connect v5.9.
+# Managed by modem-connect v5.17.
 # Never let ModemManager probe/claim the FM350 while it is in the USB/RNDIS
 # composition. Other modem vendors and transports remain untouched.
 ACTION!="remove", SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="7126", ENV{ID_MM_DEVICE_IGNORE}="1"
@@ -1381,7 +1409,7 @@ EOF
 fm350_block_modemmanager() {
   fm350_install_mm_ignore_rule
 
-  # v5.9 deliberately masks MM while an FM350 USB/RNDIS transport is selected.
+  # v5.16 deliberately masks MM while an FM350 USB/RNDIS transport is selected.
   # This prevents D-Bus/udev activation from starting MM behind our back.
   if systemctl is-active --quiet ModemManager.service; then
     log "Stopping ModemManager for FM350 USB/RNDIS."
@@ -1392,7 +1420,7 @@ fm350_block_modemmanager() {
 }
 
 modemmanager_allow_for_other_modems() {
-  # If v5.9 previously masked MM for an FM350, a later run with another modem
+  # If v5.16 previously masked MM for an FM350, a later run with another modem
   # must remain compatible: remove our mask and allow the selected MM backend.
   if [ "$(systemctl is-enabled ModemManager.service 2>/dev/null || true)" = "masked" ]; then
     log "Non-FM350/MM backend requires ModemManager; removing the FM350 mask."
@@ -1405,7 +1433,7 @@ start_mm() {
   have_cmd mmcli || return 1
   modemmanager_allow_for_other_modems || return 1
 
-  # v5.9: MM remains strictly on-demand. No static systemd dependency exists.
+  # v5.16: MM remains strictly on-demand. No static systemd dependency exists.
   if ! systemctl is-active --quiet ModemManager.service; then
     systemctl start ModemManager.service >/dev/null 2>&1 || return 1
     sleep 3
@@ -2196,13 +2224,13 @@ auto_repair_mhi_once() {
   log "Detected after recovery: Modem/$MODEM, primary port ${PRIMARY_PORT:-unknown}, MM-ID ${MODEM_DEVICE_ID:-unknown}"
 
   mmcli_timed 30 -m "$MODEM" --enable >/dev/null 2>&1 || true
-  for step in $(seq 1 30); do
+  for step in $(seq 1 "$RM505Q_REDISCOVERY_WAIT"); do
     MINFO="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
     state="$(printf '%s\n' "$MINFO" | kv_get modem.generic.state)"
     case "$state" in registered|connected) break ;; esac
-    [ "$step" -eq 1 ] || [ $((step % 5)) -ne 0 ] || \
-      log "Waiting for registration after RM505Q recovery: ${state:-unknown} ($((step*2))/60 Sekunden)"
-    sleep 2
+    [ "$step" -eq 1 ] || [ $((step % 10)) -ne 0 ] || \
+      log "Waiting for registration after RM505Q recovery: ${state:-unknown} (${step}/${RM505Q_REDISCOVERY_WAIT}s)"
+    sleep 1
   done
 
   case "$state" in
@@ -2220,9 +2248,132 @@ auto_repair_mhi_once() {
 
   return 0
 }
+mm_wait_registered_or_connected() {
+  local limit="${1:-30}" step info state
+  for step in $(seq 1 "$limit"); do
+    info="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
+    state="$(printf '%s\n' "$info" | kv_get modem.generic.state)"
+    case "$state" in
+      registered|connected)
+        MINFO="$info"
+        return 0
+        ;;
+      failed)
+        return 1
+        ;;
+    esac
+    [ "$step" -eq 1 ] || [ $((step % 10)) -ne 0 ] || \
+      log "Waiting for ModemManager state registered/connected: ${state:-unknown} (${step}/${limit}s)"
+    sleep 1
+  done
+  return 1
+}
+
+mm_recover_stuck_control_plane() {
+  local reason="${1:-stuck ModemManager/MBIM control plane}"
+  local target_equipment="$MODEM_EQUIPMENT_ID"
+  local target_device="$MODEM_DEVICE_ID"
+  local info state
+
+  warn "RM505Q/ModemManager recovery: $reason."
+
+  # Stage 1: abort half-open Simple.Connect and delete stale bearer objects.
+  mmcli_timed 20 -m "$MODEM" --simple-disconnect >/dev/null 2>&1 || true
+  clean_modem_bearers "$MODEM"
+
+  info="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
+  state="$(printf '%s\n' "$info" | kv_get modem.generic.state)"
+  case "$state" in
+    registered)
+      log "Bearer cleanup returned modem/$MODEM to registered state."
+      return 0
+      ;;
+  esac
+
+  # Stage 2: restart ModemManager so the MBIM control protocol is reopened.
+  log "Restarting ModemManager to reopen the MBIM/WWAN control plane."
+  if restart_mm_and_rediscover; then
+    if mm_wait_registered_or_connected "$MM_STUCK_CONNECT_WAIT"; then
+      return 0
+    fi
+  fi
+
+  # Stage 3: for PCIe/MHI only, perform the proven full RM505Q recovery.
+  if [ "$MODEM_DRIVER" = "mhi-pci-generic" ] && [ "$AUTO_REPAIR" -eq 1 ]; then
+    warn "ModemManager restart did not clear the stuck state; escalating to controlled PCIe/MHI recovery."
+    MODEM_EQUIPMENT_ID="$target_equipment"
+    MODEM_DEVICE_ID="$target_device"
+    if auto_repair_mhi_once; then
+      return 0
+    fi
+  fi
+
+  warn "RM505Q/ModemManager recovery did not restore a connection-ready state."
+  return 1
+}
+
+mm_connected_bearer_is_usable() {
+  local bearer="${1:-}" binfo iface method addr
+  [ -n "$bearer" ] || return 1
+  binfo="$(mmcli -b "$bearer" -K 2>/dev/null || true)"
+  [ "$(printf '%s\n' "$binfo" | kv_get bearer.status.connected)" = yes ] || return 1
+
+  iface="$(printf '%s\n' "$binfo" | kv_get bearer.status.interface)"
+  method="$(printf '%s\n' "$binfo" | kv_get bearer.ipv4-config.method)"
+  addr="$(printf '%s\n' "$binfo" | kv_get bearer.ipv4-config.address)"
+
+  [ -n "$iface" ] && [ "$iface" != -- ] || return 1
+  case "$method" in
+    static) [ -n "$addr" ] && [ "$addr" != -- ] || return 1 ;;
+    dhcp|ppp) : ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+mm_bearer_data_path_alive() {
+  local bearer="${1:-}" binfo iface
+  [ -n "$bearer" ] || return 1
+
+  binfo="$(mmcli -b "$bearer" -K 2>/dev/null || true)"
+  [ "$(printf '%s\n' "$binfo" | kv_get bearer.status.connected)" = yes ] || return 1
+
+  iface="$(printf '%s\n' "$binfo" | kv_get bearer.status.interface)"
+  [ -n "$iface" ] && [ "$iface" != -- ] || return 1
+
+  ip link show "$iface" >/dev/null 2>&1 || return 1
+  ip -4 -o addr show dev "$iface" scope global 2>/dev/null | grep -q . || return 1
+
+  # A bearer is reusable only when its real bound data path answers. This avoids
+  # treating ModemManager's stale "connected" state as proof of Internet access.
+  /bin/ping -I "$iface" -c "$MM_BEARER_HEALTH_PINGS" \
+    -W "$MM_BEARER_HEALTH_TIMEOUT" "$MM_BEARER_HEALTH_TARGET" \
+    >/dev/null 2>&1
+}
+
+mm_rebuild_dead_bearer() {
+  local reason="${1:-dead bearer data path}"
+  warn "RM505Q bearer recovery: $reason."
+
+  # First try the least disruptive path: tear down only the user data bearer,
+  # keeping modem registration and the initial EPS bearer intact.
+  mmcli_timed 20 -m "$MODEM" --simple-disconnect >/dev/null 2>&1 || true
+  clean_modem_bearers "$MODEM"
+  CONNECTED_BEARER=""
+
+  if mm_wait_registered_or_connected "$MM_STUCK_CONNECT_WAIT"; then
+    MINFO="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
+    return 0
+  fi
+
+  # If the control plane did not settle, use the existing staged recovery.
+  mm_recover_stuck_control_plane "$reason"
+}
+
 connect_mm() {
   local state power ready enable_output enable_status
-  local cached_mux first_mode second_mode success_mode connect_output connect_status props current_info current_state binfo step
+  local cached_mux first_mode second_mode success_mode connect_output connect_status props
+  local current_info current_state binfo step poll mm_recovery_tried existing_bearer stuck_reason
   [ -n "$MODEM" ] || return 1
   start_mm || return 1
 
@@ -2230,129 +2381,252 @@ connect_mm() {
   state="$(printf '%s\n' "$MINFO" | kv_get modem.generic.state)"
   power="$(printf '%s\n' "$MINFO" | kv_get modem.generic.power-state)"
 
-  case "$state" in
-    disabled|failed|unknown|"")
-      log "ModemManager: enabling modem/$MODEM (state ${state:-unknown}, radio ${power:-unknown})."
-      enable_output="$(mmcli_timed 45 -m "$MODEM" --enable 2>&1)"
-      enable_status=$?
-      [ -n "$enable_output" ] && printf '%s\n' "$enable_output"
-      if [ "$enable_status" -ne 0 ]; then
-        sleep 2
+  # A real connected bearer is the only accepted "already connected" state.
+  existing_bearer="$(find_connected_bearer || true)"
+  if [ "$state" = connected ] && mm_connected_bearer_is_usable "$existing_bearer"; then
+    if mm_bearer_data_path_alive "$existing_bearer"; then
+      CONNECTED_BEARER="$existing_bearer"
+      log "ModemManager: modem/$MODEM is already connected with Bearer/$CONNECTED_BEARER and the bound data path is alive; reusing it."
+    else
+      warn "ModemManager reports Bearer/$existing_bearer connected, but the bound WWAN data path is dead; treating it as a ghost/stale bearer."
+      if ! mm_rebuild_dead_bearer "connected Bearer/$existing_bearer has no working bound data path"; then
+        return 1
+      fi
+      MINFO="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
+      state="$(printf '%s\n' "$MINFO" | kv_get modem.generic.state)"
+      power="$(printf '%s\n' "$MINFO" | kv_get modem.generic.power-state)"
+      CONNECTED_BEARER=""
+
+      # v5.15 stopped here and therefore reported "ended without a connected
+      # bearer". v5.16 immediately runs the normal registered -> Simple.Connect
+      # path once, in the same service invocation.
+      if [ "$MM_GHOST_RECONNECT_REENTRY" = "1" ]; then
+        warn "Ghost-bearer recovery reached reconnect re-entry twice; refusing an endless reconnect loop."
+        return 1
+      fi
+      log "Ghost/stale bearer teardown completed; starting an immediate fresh bearer connection."
+      MM_GHOST_RECONNECT_REENTRY=1 connect_mm
+      return $?
+    fi
+  else
+    CONNECTED_BEARER=""
+
+    case "$state" in
+      connecting|disconnecting)
+        if ! mm_recover_stuck_control_plane "modem remained in state $state without a usable connected bearer"; then
+          return 1
+        fi
         MINFO="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
         state="$(printf '%s\n' "$MINFO" | kv_get modem.generic.state)"
         power="$(printf '%s\n' "$MINFO" | kv_get modem.generic.power-state)"
-        case "$state" in
-          enabled|registered|connected) warn "ModemManager --enable reported rc=$enable_status, Modem ist but bereits $state; fahre fort." ;;
-          *) warn "ModemManager could not enable the modem: state ${state:-unknown}, radio ${power:-unknown}, rc=$enable_status"; return 1 ;;
-        esac
-      fi
-      ;;
-  esac
-
-  ready=0
-  for step in $(seq 1 90); do
-    MINFO="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
-    state="$(printf '%s\n' "$MINFO" | kv_get modem.generic.state)"
-    power="$(printf '%s\n' "$MINFO" | kv_get modem.generic.power-state)"
-    case "$state" in
-      enabled|registered|connected) ready=1; break ;;
-      failed) warn "ModemManager: Modem ist in den Fehlerzustand gewechselt"; return 1 ;;
-    esac
-    [ "$step" -eq 1 ] || [ $((step % 10)) -ne 0 ] || log "Waiting for a connection-ready modem state: ${state:-unknown}, radio ${power:-unknown} (${step}/90s)"
-    sleep 1
-  done
-  [ "$ready" -eq 1 ] || { warn "ModemManager: modem did not become connection-ready (state ${state:-unknown}, radio ${power:-unknown})"; return 1; }
-  log "ModemManager: modem is connection-ready (state $state, radio ${power:-unknown}); simple-connect will handle registration."
-
-  disconnect_other_modems
-  clean_modem_bearers "$MODEM"
-  CONNECTED_BEARER=""
-
-  mm_attempt() {
-    local mode="$1" poll
-    props="apn=${APN},ip-type=ipv4"
-    [ "$mode" = none ] && props="${props},multiplex=none"
-    log "ModemManager-connectionsversuch: multiplex=$mode"
-    connect_output="$(mmcli_timed 120 -m "$MODEM" --simple-connect="$props" 2>&1)"
-    connect_status=$?
-    [ -n "$connect_output" ] && printf '%s\n' "$connect_output"
-
-    for poll in $(seq 1 40); do
-      CONNECTED_BEARER="$(find_connected_bearer || true)"
-      current_info="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
-      current_state="$(printf '%s\n' "$current_info" | kv_get modem.generic.state)"
-      if [ -n "$CONNECTED_BEARER" ]; then
-        if [ "$connect_status" -ne 0 ]; then
-          warn "mmcli reported rc=$connect_status, but Bearer/$CONNECTED_BEARER is active; treating the connection as successful."
+        ;;
+      connected)
+        # "connected" without a usable bearer is stale state.
+        if ! mm_recover_stuck_control_plane "ModemManager reported connected but no usable connected bearer exists"; then
+          return 1
         fi
-        return 0
-      fi
-      case "$current_state" in
-        failed) break ;;
+        MINFO="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
+        state="$(printf '%s\n' "$MINFO" | kv_get modem.generic.state)"
+        power="$(printf '%s\n' "$MINFO" | kv_get modem.generic.power-state)"
+        ;;
+      disabled|failed|unknown|"")
+        log "ModemManager: enabling modem/$MODEM (state ${state:-unknown}, radio ${power:-unknown})."
+        enable_output="$(mmcli_timed 45 -m "$MODEM" --enable 2>&1)"
+        enable_status=$?
+        [ -n "$enable_output" ] && printf '%s\n' "$enable_output"
+        if [ "$enable_status" -ne 0 ]; then
+          sleep 2
+          MINFO="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
+          state="$(printf '%s\n' "$MINFO" | kv_get modem.generic.state)"
+          power="$(printf '%s\n' "$MINFO" | kv_get modem.generic.power-state)"
+          case "$state" in
+            enabled|registered|connected)
+              warn "ModemManager --enable reported rc=$enable_status, but modem is already $state; continuing."
+              ;;
+            *)
+              warn "ModemManager could not enable the modem: state ${state:-unknown}, radio ${power:-unknown}, rc=$enable_status"
+              return 1
+              ;;
+          esac
+        fi
+        ;;
+    esac
+
+    ready=0
+    for step in $(seq 1 90); do
+      MINFO="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
+      state="$(printf '%s\n' "$MINFO" | kv_get modem.generic.state)"
+      power="$(printf '%s\n' "$MINFO" | kv_get modem.generic.power-state)"
+      case "$state" in
+        enabled|registered) ready=1; break ;;
+        connected)
+          existing_bearer="$(find_connected_bearer || true)"
+          if mm_connected_bearer_is_usable "$existing_bearer"; then
+            CONNECTED_BEARER="$existing_bearer"
+            ready=1
+            break
+          fi
+          ;;
+        failed)
+          warn "ModemManager: modem entered failed state"
+          return 1
+          ;;
       esac
-      [ "$poll" -eq 1 ] || [ $((poll % 10)) -ne 0 ] || log "Waiting for an active bearer: Modemzustand ${current_state:-unknown} (${poll}/40s)"
+      [ "$step" -eq 1 ] || [ $((step % 10)) -ne 0 ] || \
+        log "Waiting for a connection-ready modem state: ${state:-unknown}, radio ${power:-unknown} (${step}/90s)"
       sleep 1
     done
-    warn "ModemManager-connection failed: rc=$connect_status, state ${current_state:-unknown}, no active bearer"
-    return 1
-  }
+    [ "$ready" -eq 1 ] || {
+      warn "ModemManager: modem did not become connection-ready (state ${state:-unknown}, radio ${power:-unknown})"
+      return 1
+    }
 
-  delete_disconnected_bearers
-  success_mode=""
+    if [ -z "$CONNECTED_BEARER" ]; then
+      log "ModemManager: modem is connection-ready (state $state, radio ${power:-unknown}); establishing the bearer."
 
-  try_mm_mode() {
-    local mode="$1"
-    if mm_attempt "$mode"; then
-      success_mode="$mode"
-      return 0
-    fi
-    if [ "$mode" = none ] && echo "$connect_output" | grep -q "Cannot disable multiplex support"; then
-      if auto_repair_mhi_once; then
-        clean_modem_bearers "$MODEM"
-        CONNECTED_BEARER=""
-        if mm_attempt none; then
-          success_mode=none
+      # Only other modems are disconnected. The selected modem is cleaned only
+      # because no usable bearer exists.
+      disconnect_other_modems
+      clean_modem_bearers "$MODEM"
+      delete_disconnected_bearers
+
+      success_mode=""
+      mm_recovery_tried=0
+
+      mm_attempt() {
+        local mode="$1"
+        props="apn=${APN},ip-type=ipv4"
+        [ "$mode" = none ] && props="${props},multiplex=none"
+        log "ModemManager connection attempt: multiplex=$mode"
+        connect_output="$(mmcli_timed 120 -m "$MODEM" --simple-connect="$props" 2>&1)"
+        connect_status=$?
+        [ -n "$connect_output" ] && printf '%s\n' "$connect_output"
+
+        # Do not trust Simple.Connect's return code alone. Require a real
+        # connected bearer, as the older RM505Q recovery helper already did.
+        for poll in $(seq 1 45); do
+          CONNECTED_BEARER="$(find_connected_bearer || true)"
+          current_info="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
+          current_state="$(printf '%s\n' "$current_info" | kv_get modem.generic.state)"
+
+          if mm_connected_bearer_is_usable "$CONNECTED_BEARER"; then
+            if [ "$connect_status" -ne 0 ]; then
+              warn "mmcli reported rc=$connect_status, but Bearer/$CONNECTED_BEARER is connected and usable; treating connection as successful."
+            fi
+            return 0
+          fi
+
+          case "$current_state" in
+            failed) break ;;
+          esac
+          [ "$poll" -eq 1 ] || [ $((poll % 10)) -ne 0 ] || \
+            log "Waiting for a usable connected bearer: modem state ${current_state:-unknown} (${poll}/45s)"
+          sleep 1
+        done
+
+        warn "ModemManager connection failed: rc=$connect_status, state ${current_state:-unknown}, no usable connected bearer"
+        return 1
+      }
+
+      try_mm_mode() {
+        local mode="$1"
+        stuck_reason=""
+
+        if mm_attempt "$mode"; then
+          success_mode="$mode"
           return 0
         fi
+
+        if printf '%s\n' "$connect_output" | grep -Eq 'Protocol\.NotOpened|MBIM protocol error: NotOpened'; then
+          stuck_reason="MBIM protocol session is NotOpened"
+        elif [ "$current_state" = connecting ] || [ "$current_state" = disconnecting ]; then
+          stuck_reason="ModemManager remained in state ${current_state}"
+        elif [ "$current_state" = connected ] && ! mm_connected_bearer_is_usable "$(find_connected_bearer || true)"; then
+          stuck_reason="ModemManager reports connected without a usable connected bearer"
+        fi
+
+        # One controlled recovery per connect invocation, then retry same mode.
+        if [ -n "$stuck_reason" ] && [ "$mm_recovery_tried" -eq 0 ]; then
+          mm_recovery_tried=1
+          if mm_recover_stuck_control_plane "$stuck_reason"; then
+            clean_modem_bearers "$MODEM"
+            CONNECTED_BEARER=""
+            if mm_attempt "$mode"; then
+              success_mode="$mode"
+              return 0
+            fi
+          fi
+        fi
+
+        # Preserve the already proven RM505Q multiplex/MHI recovery.
+        if [ "$mode" = none ] && printf '%s\n' "$connect_output" | grep -q "Cannot disable multiplex support"; then
+          if auto_repair_mhi_once; then
+            clean_modem_bearers "$MODEM"
+            CONNECTED_BEARER=""
+            if mm_attempt none; then
+              success_mode=none
+              return 0
+            fi
+          fi
+        fi
+        return 1
+      }
+
+      if [ "$MULTIPLEX_MODE" = none ]; then
+        try_mm_mode none || true
+      elif [ "$MULTIPLEX_MODE" = default ]; then
+        try_mm_mode default || true
+      else
+        cached_mux="$(cache_read "$MUX_CACHE" "$MODEM_KEY")"
+        case "$cached_mux" in
+          none|default) first_mode="$cached_mux" ;;
+          *) if mm_prefers_multiplex_none; then first_mode=none; else first_mode=default; fi ;;
+        esac
+
+        second_mode=""
+        if [ "$first_mode" = default ]; then
+          second_mode=none
+        elif ! mm_prefers_multiplex_none; then
+          second_mode=default
+        fi
+
+        if ! try_mm_mode "$first_mode"; then
+          if [ "$first_mode" = default ] && printf '%s\n' "$connect_output" | grep -q "Cannot disable multiplex support"; then
+            log "Known multiplex error; restarting ModemManager before multiplex=none retry."
+            restart_mm_and_rediscover || true
+            second_mode=none
+          fi
+          [ -n "$second_mode" ] && try_mm_mode "$second_mode" || true
+        fi
       fi
+
+      [ -n "$success_mode" ] || return 1
+      cache_write "$MUX_CACHE" "$MODEM_KEY" "$success_mode"
     fi
+  fi
+
+  # Final success criterion: connected state AND a connected/usable bearer.
+  CONNECTED_BEARER="$(find_connected_bearer || true)"
+  [ -n "$CONNECTED_BEARER" ] || {
+    warn "ModemManager ended without a connected bearer"
+    return 1
+  }
+  mm_connected_bearer_is_usable "$CONNECTED_BEARER" || {
+    warn "Bearer/$CONNECTED_BEARER is not usable"
+    return 1
+  }
+  mm_bearer_data_path_alive "$CONNECTED_BEARER" || {
+    warn "Bearer/$CONNECTED_BEARER is marked connected but its bound WWAN data path is not alive"
     return 1
   }
 
-  if [ "$MULTIPLEX_MODE" = none ]; then
-    try_mm_mode none || true
-  elif [ "$MULTIPLEX_MODE" = default ]; then
-    try_mm_mode default || true
-  else
-    cached_mux="$(cache_read "$MUX_CACHE" "$MODEM_KEY")"
-    case "$cached_mux" in
-      none|default) first_mode="$cached_mux" ;;
-      *) if mm_prefers_multiplex_none; then first_mode=none; else first_mode=default; fi ;;
-    esac
-    second_mode=""
-    if [ "$first_mode" = default ]; then
-      second_mode=none
-    elif ! mm_prefers_multiplex_none; then
-      second_mode=default
-    fi
+  current_info="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
+  current_state="$(printf '%s\n' "$current_info" | kv_get modem.generic.state)"
+  [ "$current_state" = connected ] || {
+    warn "Bearer/$CONNECTED_BEARER is connected, but modem state is ${current_state:-unknown}; refusing to mark WWAN as fully connected."
+    return 1
+  }
 
-    if ! try_mm_mode "$first_mode"; then
-      if [ "$first_mode" = default ] && echo "$connect_output" | grep -q "Cannot disable multiplex support"; then
-        log "Bekannter Multiplexfehler; starte ModemManager vor dem none-Versuch neu."
-        restart_mm_and_rediscover || true
-        second_mode=none
-      fi
-      [ -n "$second_mode" ] && try_mm_mode "$second_mode" || true
-    fi
-  fi
-
-  [ -n "$success_mode" ] || return 1
-  cache_write "$MUX_CACHE" "$MODEM_KEY" "$success_mode"
-
-  if [ -z "$CONNECTED_BEARER" ]; then
-    for step in $(seq 1 20); do CONNECTED_BEARER="$(find_connected_bearer || true)"; [ -n "$CONNECTED_BEARER" ] && break; sleep 1; done
-  fi
-  [ -n "$CONNECTED_BEARER" ] || return 1
   binfo="$(mmcli -b "$CONNECTED_BEARER" -K)"
   NET_IF="$(printf '%s\n' "$binfo" | kv_get bearer.status.interface)"
   IP_METHOD="$(printf '%s\n' "$binfo" | kv_get bearer.ipv4-config.method)"
@@ -2360,6 +2634,7 @@ connect_mm() {
   PREFIX="$(printf '%s\n' "$binfo" | kv_get bearer.ipv4-config.prefix)"
   GATEWAY="$(printf '%s\n' "$binfo" | kv_get bearer.ipv4-config.gateway)"
   MTU="$(printf '%s\n' "$binfo" | kv_get bearer.ipv4-config.mtu)"
+
   [ -n "$NET_IF" ] && [ "$NET_IF" != -- ] || return 1
   case "$IP_METHOD" in
     static)
@@ -2369,15 +2644,24 @@ connect_mm() {
       ip addr add "$IP/$PREFIX" dev "$NET_IF"
       [ -n "$MTU" ] && [ "$MTU" != -- ] && ip link set dev "$NET_IF" mtu "$MTU" 2>/dev/null || true
       ;;
-    dhcp) run_dhcp "$NET_IF" ;;
-    ppp) : ;;
-    *) warn "Unbekannte IPv4-Methode des Bearers: ${IP_METHOD:-leer}"; return 1 ;;
+    dhcp)
+      run_dhcp "$NET_IF"
+      ;;
+    ppp)
+      :
+      ;;
+    *)
+      warn "Unknown IPv4 method from connected bearer: ${IP_METHOD:-empty}"
+      return 1
+      ;;
   esac
+
   if [ "$IP_METHOD" = dhcp ]; then
     IP="$(ip -4 -o addr show dev "$NET_IF" scope global | awk 'NR==1 {split($4,a,"/"); print a[1]}')"
     PREFIX="$(ip -4 -o addr show dev "$NET_IF" scope global | awk 'NR==1 {split($4,a,"/"); print a[2]}')"
     GATEWAY="$(ip -4 route show default dev "$NET_IF" | awk 'NR==1 {for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')"
   fi
+
   BACKEND_USED=mm
   return 0
 }
@@ -2717,9 +3001,13 @@ if [ "$FM350_AVAILABLE" -eq 1 ] && [ "$FM350_TRANSPORT" = usb ] && [ -n "$FM350_
   log "FM350 USB/RNDIS detected; ModemManager detection is skipped for this transport."
   fm350_block_modemmanager
 else
-  # No FM350 USB/RNDIS transport: remove a mask left by an earlier FM350 run
-  # so MBIM/QMI/PCIe/other supported modems keep working normally.
+  # No FM350 USB/RNDIS transport: remove mask/recovery artifacts left by an
+  # earlier FM350 installation so PCIe/MHI/MBIM/QMI modems are not affected by
+  # obsolete eth1/FM350 recovery jobs.
   modemmanager_allow_for_other_modems || true
+  if [ "$SERVICE_RUN" -eq 0 ]; then
+    fm350_remove_usb_recovery_artifacts
+  fi
   discover_mm_modem && MM_AVAILABLE=1
 fi
 if [ "$MM_AVAILABLE" -eq 1 ]; then
@@ -2923,9 +3211,9 @@ EOF
 write_failover_service_unit() {
   # Generic WAN failover monitor. It does not know or care whether the modem is
   # FM350, QMI, MBIM, ModemManager, ECM/NCM/RNDIS or PPP. modem-connect writes
-  # the current modem interface/gateway to ROUTE_CACHE; this monitor only keeps
-  # the routing preference correct. It never resets/reconnects a modem and never
-  # runs a VyOS commit.
+  # the current modem interface/gateway to ROUTE_CACHE. The monitor keeps routing
+  # preference correct and may request a controlled modem-connect restart when
+  # liveness/state/data-path checks fail; it never performs a VyOS commit itself.
   cat > "$FAILOVER_SCRIPT_PATH" <<'FAILOVER_EOF'
 #!/bin/bash
 set -u
@@ -2939,10 +3227,14 @@ NOIP_ATTEMPTS="${WWAN_NOIP_ATTEMPTS:-4}"
 RECOVERY_COOLDOWN="${WWAN_RECOVERY_COOLDOWN:-60}"
 CONNECT_GRACE="${WWAN_CONNECT_GRACE:-60}"
 DATA_HEALTH_INTERVAL="${WWAN_DATA_HEALTH_INTERVAL:-15}"
-DATA_HEALTH_FAILURES="${WWAN_DATA_HEALTH_FAILURES:-2}"
+DATA_HEALTH_FAILURES="${WWAN_DATA_HEALTH_FAILURES:-3}"
 DATA_HEALTH_TARGET="${WWAN_DATA_HEALTH_TARGET:-1.1.1.1}"
+DATA_HEALTH_PINGS="${WWAN_DATA_HEALTH_PINGS:-3}"
+MM_ALWAYS_CONNECTED="${MM_ALWAYS_CONNECTED:-1}"
+MM_STATE_FAILURES="${MM_STATE_FAILURES:-2}"
 noip_count=0
 health_fail_count=0
+mm_state_fail_count=0
 last_health_check=0
 last_recovery=0
 
@@ -3168,8 +3460,64 @@ check_wwan_liveness() {
   systemctl restart --no-block modem-connect.service >/dev/null 2>&1 || true
 }
 
+check_mm_always_connected() {
+  local backend modem_id info state id binfo connected bearer_found now service_name service_state service_pid
+  [ "$MM_ALWAYS_CONNECTED" = "1" ] || return 0
+
+  backend="$(cfg_get "$ROUTE_CACHE" BACKEND)"
+  [ "$backend" = mm ] || { mm_state_fail_count=0; return 0; }
+
+  modem_id="$(cfg_get "$ROUTE_CACHE" MODEM_ID)"
+  [ -n "$modem_id" ] || { mm_state_fail_count=0; return 0; }
+  systemctl is-active --quiet ModemManager.service || return 0
+
+  info="$(mmcli -m "$modem_id" -K 2>/dev/null || true)"
+  state="$(printf '%s\n' "$info" | sed -n 's/^[^:]*modem\.generic\.state[[:space:]]*:[[:space:]]*//p' | head -1)"
+
+  bearer_found=0
+  while read -r id; do
+    [ -n "$id" ] || continue
+    binfo="$(mmcli -b "$id" -K 2>/dev/null || true)"
+    connected="$(printf '%s\n' "$binfo" | sed -n 's/^[^:]*bearer\.status\.connected[[:space:]]*:[[:space:]]*//p' | head -1)"
+    if [ "$connected" = yes ]; then
+      bearer_found=1
+      break
+    fi
+  done < <(printf '%s\n' "$info" | sed -n 's#^[^:]*bearers\.value\[[0-9]\+\][[:space:]]*:[[:space:]]*.*/Bearer/\([0-9]\+\).*#\1#p')
+
+  if [ "$state" = connected ] && [ "$bearer_found" -eq 1 ]; then
+    mm_state_fail_count=0
+    return 0
+  fi
+
+  mm_state_fail_count=$((mm_state_fail_count + 1))
+  [ "$mm_state_fail_count" -ge "$MM_STATE_FAILURES" ] || return 0
+
+  # Do not race a genuinely running/transitioning connect, unlock or recovery
+  # transaction. Type=oneshot units use RemainAfterExit=yes, so active/exited
+  # with MainPID=0 is completed/idle and must NOT suppress always-connected.
+  for service_name in modem-connect.service modem-unlock.service modem-connect-recover.service; do
+    service_state="$(systemctl show "$service_name" -p ActiveState --value 2>/dev/null || true)"
+    service_pid="$(systemctl show "$service_name" -p MainPID --value 2>/dev/null || true)"
+    if [ "$service_state" = "activating" ] || [ "$service_state" = "deactivating" ] || \
+       { [ -n "$service_pid" ] && [ "$service_pid" != "0" ]; }; then
+      return 0
+    fi
+  done
+
+  now="$(date +%s)"
+  [ $((now - last_recovery)) -ge "$RECOVERY_COOLDOWN" ] || return 0
+
+  log "Always-connected policy: modem/$modem_id state=${state:-unknown}, connected-bearer=$bearer_found; requesting generic modem reconnect."
+  mm_state_fail_count=0
+  last_recovery="$now"
+  systemctl restart --no-block modem-connect.service >/dev/null 2>&1 || true
+}
+
 check_wwan_data_path() {
   local iface ip4 now service_name state pid baseline current
+  local backend transport driver model probe_output
+
   iface="$(cfg_get "$ROUTE_CACHE" INTERFACE)"
   [ -n "$iface" ] || { health_fail_count=0; return 0; }
   ip link show "$iface" >/dev/null 2>&1 || return 0
@@ -3181,7 +3529,7 @@ check_wwan_data_path() {
   [ $((now - last_health_check)) -ge "$DATA_HEALTH_INTERVAL" ] || return 0
   last_health_check="$now"
 
-  # Never probe/recover while another modem action is transitioning.
+  # Never compete with unlock/connect/recovery.
   for service_name in modem-unlock.service modem-connect.service modem-connect-recover.service; do
     state="$(systemctl show "$service_name" -p ActiveState --value 2>/dev/null || true)"
     pid="$(systemctl show "$service_name" -p MainPID --value 2>/dev/null || true)"
@@ -3191,28 +3539,53 @@ check_wwan_data_path() {
     fi
   done
 
-  if /bin/ping -I "$iface" -c 1 -W 2 "$DATA_HEALTH_TARGET" >/dev/null 2>&1; then
+  # Cellular links may drop isolated ICMP packets under load. A bearer is
+  # considered alive if ANY bound probe succeeds; do not reconnect for ordinary
+  # congestion or moderate packet loss.
+  probe_output="$(/bin/ping -I "$iface" -c "$DATA_HEALTH_PINGS" -W 2 "$DATA_HEALTH_TARGET" 2>/dev/null || true)"
+  if printf '%s\n' "$probe_output" | grep -q 'bytes from '; then
     health_fail_count=0
     return 0
   fi
 
   health_fail_count=$((health_fail_count + 1))
-  baseline="$(cfg_get "$ROUTE_CACHE" WATCHDOG_BASELINE)"
-  current="$(watchdog_count "$iface")"
-  [ -n "$baseline" ] || baseline=0
+  backend="$(cfg_get "$ROUTE_CACHE" BACKEND)"
+  transport="$(cfg_get "$ROUTE_CACHE" TRANSPORT)"
+  driver="$(cfg_get "$ROUTE_CACHE" DRIVER)"
+  model="$(cfg_get "$ROUTE_CACHE" MODEL)"
 
-  if [ "$current" -gt "$baseline" ]; then
-    log "New rndis_host NETDEV WATCHDOG detected on $iface ($baseline -> $current); requesting staged FM350 recovery."
-    health_fail_count="$DATA_HEALTH_FAILURES"
+  # NETDEV WATCHDOG is specific to the observed FM350 USB/RNDIS failure mode.
+  if [ "$backend" = "at-rndis" ] && [ "$transport" = "usb" ]; then
+    baseline="$(cfg_get "$ROUTE_CACHE" WATCHDOG_BASELINE)"
+    current="$(watchdog_count "$iface")"
+    [ -n "$baseline" ] || baseline=0
+    if [ "$current" -gt "$baseline" ]; then
+      log "New rndis_host NETDEV WATCHDOG detected on $iface ($baseline -> $current); requesting staged FM350 USB/RNDIS recovery."
+      health_fail_count="$DATA_HEALTH_FAILURES"
+    fi
   fi
 
   [ "$health_fail_count" -ge "$DATA_HEALTH_FAILURES" ] || return 0
   [ $((now - last_recovery)) -ge "$RECOVERY_COOLDOWN" ] || return 0
 
-  log "WWAN $iface failed $health_fail_count consecutive real data-path checks; starting health-aware recovery."
   last_recovery="$now"
   health_fail_count=0
-  systemctl start --no-block modem-connect-recover.service >/dev/null 2>&1 || true
+
+  if [ "$backend" = "at-rndis" ] && [ "$transport" = "usb" ]; then
+    log "WWAN $iface has no real data path after repeated probes; starting staged FM350 USB/RNDIS recovery."
+    if systemctl cat modem-connect-recover.service >/dev/null 2>&1; then
+      systemctl start --no-block modem-connect-recover.service >/dev/null 2>&1 || true
+    else
+      log "FM350 recovery unit is unavailable; falling back to the generic modem reconnect service."
+      systemctl restart --no-block modem-connect.service >/dev/null 2>&1 || true
+    fi
+  else
+    # Generic recovery for PCIe/MHI/ModemManager, MBIM, QMI, DHCP and PPP.
+    # modem-connect.sh already performs the correct bearer cleanup and reconnect
+    # for the selected backend. No USB/RNDIS unbind is attempted here.
+    log "WWAN $iface (${model:-unknown}, transport ${transport:-unknown}, backend ${backend:-unknown}, driver ${driver:-unknown}) has no real data path after repeated probes; requesting generic modem reconnect."
+    systemctl restart --no-block modem-connect.service >/dev/null 2>&1 || true
+  fi
 }
 
 reconcile_wired() {
@@ -3252,6 +3625,7 @@ last=""
 while :; do
   ensure_wwan_route
   check_wwan_liveness
+  check_mm_always_connected
   check_wwan_data_path
   reconcile_wired
 
@@ -3289,6 +3663,9 @@ Environment=WWAN_CONNECT_GRACE=$WWAN_CONNECT_GRACE
 Environment=WWAN_DATA_HEALTH_INTERVAL=$WWAN_DATA_HEALTH_INTERVAL
 Environment=WWAN_DATA_HEALTH_FAILURES=$WWAN_DATA_HEALTH_FAILURES
 Environment=WWAN_DATA_HEALTH_TARGET=$WWAN_DATA_HEALTH_TARGET
+Environment=WWAN_DATA_HEALTH_PINGS=$WWAN_DATA_HEALTH_PINGS
+Environment=MM_ALWAYS_CONNECTED=$MM_ALWAYS_CONNECTED
+Environment=MM_STATE_FAILURES=$MM_STATE_FAILURES
 
 [Install]
 WantedBy=multi-user.target
@@ -3451,6 +3828,7 @@ fi
 if [ "$WWAN_CONNECTED" -eq 1 ]; then
   if [ "$IP_METHOD" = ppp ]; then
     printf 'set protocols static route 0.0.0.0/0 interface %q\n' "$NET_IF" >> "$VYOS_CONFIG_HELPER"
+    # Persistent PPP WWAN route: keep behind wired WAN using unified distance 200.
     printf 'set protocols static route 0.0.0.0/0 interface %q distance %q\n' "$NET_IF" "$WWAN_ROUTE_DISTANCE" >> "$VYOS_CONFIG_HELPER"
   elif [ "$DYNAMIC_WWAN_ROUTE" -eq 1 ]; then
     # The FM350 USB gateway is dynamic. The runtime route was installed above;
@@ -3459,6 +3837,7 @@ if [ "$WWAN_CONNECTED" -eq 1 ]; then
   else
     printf 'delete protocols static route 0.0.0.0/0 next-hop %q 2>/dev/null || true\n' "$GATEWAY" >> "$VYOS_CONFIG_HELPER"
     printf 'set protocols static route 0.0.0.0/0 next-hop %q interface %q\n' "$GATEWAY" "$NET_IF" >> "$VYOS_CONFIG_HELPER"
+    # Persistent MBIM/QMI/ModemManager WWAN route: keep behind wired WAN using unified distance 200.
     printf 'set protocols static route 0.0.0.0/0 next-hop %q distance %q\n' "$GATEWAY" "$WWAN_ROUTE_DISTANCE" >> "$VYOS_CONFIG_HELPER"
   fi
 fi
@@ -3482,15 +3861,19 @@ vyos_desired_config_active() {
     route_cfg_ok=0
     printf '%s\n' "$active_cfg" | grep -F "set nat source rule $WWAN_NAT_RULE outbound-interface name" | grep -Fq "$NET_IF" && nat_ok=1
     if [ "$IP_METHOD" = ppp ]; then
-      printf '%s\n' "$active_cfg" | grep -F "set protocols static route 0.0.0.0/0 interface" | grep -Fq "$NET_IF" && route_cfg_ok=1
+      # A matching interface alone is insufficient: an older installation may
+      # still carry distance 10. Require the unified fallback distance as well.
+      printf '%s\n' "$active_cfg" |         grep -F "set protocols static route 0.0.0.0/0 interface $NET_IF distance '$WWAN_ROUTE_DISTANCE'" >/dev/null && route_cfg_ok=1
     elif [ "$DYNAMIC_WWAN_ROUTE" -eq 1 ]; then
       # FM350 USB/RNDIS gateway/IP are modem-assigned runtime values and are
       # intentionally absent from config.boot. The persistent config is valid
       # when the WWAN NAT rule is present; runtime route health is checked and
       # repaired separately below.
       route_cfg_ok=1
-    elif printf '%s\n' "$active_cfg" | grep -Fq "set protocols static route 0.0.0.0/0 next-hop $GATEWAY"; then
-      route_cfg_ok=1
+    else
+      # PCIe/MBIM/QMI/ModemManager routes are persistent VyOS routes. Verify
+      # both gateway and distance so v5.11 upgrades old distance=10 configs.
+      printf '%s\n' "$active_cfg" |         grep -Fq "set protocols static route 0.0.0.0/0 next-hop $GATEWAY distance '$WWAN_ROUTE_DISTANCE'" && route_cfg_ok=1
     fi
   else
     printf '%s\n' "$active_cfg" | grep -Fq "set nat source rule $WWAN_NAT_RULE " && nat_ok=0
@@ -3508,7 +3891,7 @@ COMMIT_OK=0
 # session in that case: only the FM350 runtime IP/default route needs restoring.
 if vyos_desired_config_active; then
   COMMIT_OK=1
-  log "Requested persistent VyOS WWAN configuration is already active; skipping redundant boot-time commit. FM350 IP/gateway/default route remain runtime state."
+  log "Requested persistent VyOS WWAN configuration, including the required WWAN route distance, is already active; skipping redundant boot-time commit."
 fi
 
 if [ "$COMMIT_OK" -eq 0 ]; then
@@ -3576,11 +3959,13 @@ for VERIFY_ATTEMPT in 1 2 3 4 5 6 7 8 9 10; do
     NAT_OK=0; ROUTE_CFG_OK=0
     printf '%s\n' "$ACTIVE_CFG" | grep -F "set nat source rule $WWAN_NAT_RULE outbound-interface name" | grep -Fq "$NET_IF" && NAT_OK=1
     if [ "$IP_METHOD" = ppp ]; then
-      printf '%s\n' "$ACTIVE_CFG" | grep -F "set protocols static route 0.0.0.0/0 interface" | grep -Fq "$NET_IF" && ROUTE_CFG_OK=1
+      printf '%s\n' "$ACTIVE_CFG" |         grep -F "set protocols static route 0.0.0.0/0 interface $NET_IF distance '$WWAN_ROUTE_DISTANCE'" >/dev/null && ROUTE_CFG_OK=1
     elif [ "$DYNAMIC_WWAN_ROUTE" -eq 1 ]; then
       # Runtime FM350 route is not a committed VyOS configuration node.
       ROUTE_CFG_OK=1
-    elif printf '%s\n' "$ACTIVE_CFG" | grep -Fq "set protocols static route 0.0.0.0/0 next-hop $GATEWAY"; then ROUTE_CFG_OK=1; fi
+    else
+      printf '%s\n' "$ACTIVE_CFG" |         grep -Fq "set protocols static route 0.0.0.0/0 next-hop $GATEWAY distance '$WWAN_ROUTE_DISTANCE'" && ROUTE_CFG_OK=1
+    fi
   fi
   # Wired WAN configuration is intentionally outside this script.
   WIRED_OK=1
@@ -3628,6 +4013,10 @@ cat > "$ROUTE_CACHE" <<EOF
 GATEWAY=${GATEWAY:-}
 INTERFACE=${NET_IF:-}
 BACKEND=$BACKEND_USED
+TRANSPORT=${MODEM_TRANSPORT:-unknown}
+DRIVER=${MODEM_DRIVER:-}
+MODEL=${MODEM_MODEL:-}
+MODEM_ID=${MODEM:-}
 IP_METHOD=${IP_METHOD:-}
 IP=${IP:-}
 PREFIX=${PREFIX:-}
@@ -3646,7 +4035,7 @@ write_failover_service_unit
 
 if [ "$WIRED_CONFIGURED" -eq 1 ]; then
   if [ "$WWAN_CONNECTED" -eq 1 ]; then
-    log "Wired WAN is managed by the AP/WAN setup; WWAN $NET_IF is installed only as fallback (runtime metric ${WWAN_ROUTE_METRIC:-n/a})."
+    log "Wired WAN is managed by the AP/WAN setup; WWAN $NET_IF is installed only as fallback (VyOS distance ${WWAN_ROUTE_DISTANCE:-n/a} for persistent routes, runtime metric ${WWAN_ROUTE_METRIC:-n/a} for dynamic routes)."
   else
     log "Wired WAN is managed externally; WWAN is currently unavailable (for example, no SIM or no registration)."
   fi
@@ -3658,6 +4047,6 @@ if [ "$WWAN_CONNECTED" -eq 1 ]; then
 else
   log "PASS: Ethernet=$WIRED_WAN active; WWAN is not connected, but configuration and autostart were installed."
 fi
-log "Autostart enabled: modem-unlock.service -> modem-connect.service; FM350 USB/RNDIS uses real bound data-path validation; persistent VyOS NAT config is separated from dynamic eth1 IP/gateway/runtime route; fallback metric is kept at 200; USB generation/watchdog recovery remains staged (rndis_host rebind -> controlled modem/radio reconnect); ModemManager remains isolated for FM350 USB/RNDIS."
+log "Autostart enabled: modem-unlock.service -> modem-connect.service; RM505Q PCIe/MHI requires connected state, a usable bearer and a live bound WWAN data path; ghost bearers are torn down and immediately rebuilt in the same service run; stuck connecting/NotOpened states escalate through bearer cleanup, MM restart and controlled MHI recovery; FM350 USB/RNDIS keeps staged recovery."
 ip -4 route show default
 builtin exit 0
