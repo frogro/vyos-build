@@ -42,6 +42,15 @@ Updated base-layer release; not a flashable VyOS image on its own.
 - Added a `SHA256SUMS` release asset for integrity verification.
 
 
+## [v2026.08.09-rock5b] - 2026-08-09
+
+- ROCK 5B: 5 GHz AP setup now prefers the proven 802.11ac path instead of experimental 5 GHz AX.
+- Added explicit 80 MHz VHT configuration for 5 GHz AC: HT40+, VHT80 center-channel mapping and short GI 80.
+- Added fast 5 GHz profile label: `5GHz Fast / 802.11ac / 80MHz`.
+- Preserved existing AP/DHCP/SSH/Ethernet-WAN setup behavior.
+- FM350 USB/RNDIS continues to be excluded from Ethernet-WAN candidate detection.
+- Verified on wlan0 with channel 36 / 80 MHz and negotiated VHT client rates up to 780 Mbit/s NSS2.
+
 ## [v2026.08.07-rock5b] - 2026-08-07
 
 Updated community build with improved modem handling, locale initialization, and image security.

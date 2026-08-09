@@ -1,5 +1,5 @@
 #!/bin/vbash
-# VyOS wireless AP, DHCP, and optional Ethernet WAN setup for ROCK 5B - Version 8.1 - stable config.boot reproduction and cellular-WAN filtering
+# VyOS wireless AP, DHCP, and optional Ethernet WAN setup for ROCK 5B - Version 8.2 - stable 5GHz AC80 profile and cellular-WAN filtering
 # Erkennt alle WLAN-devicee, laesst einen AP-faehigen Adapter auswaehlen,
 # persistently binds the VyOS configuration to the selected MAC address,
 # configures the local DHCP server, and optionally enables Ethernet WAN with NAT,
@@ -445,10 +445,11 @@ if [ -n "$CH2" ]; then
   CHANNELS+=("$CH2"); DEFAULTS+=("$(pick_default_channel "$CH2" 6)")
 fi
 if [ -n "$CH5" ]; then
-  if [ "$HE5" -eq 1 ]; then
-    LABELS+=("5GHz WiFi 6 / 802.11ax"); MODES+=("ax")
-  elif [ "$VHT5" -eq 1 ]; then
-    LABELS+=("5GHz / 802.11ac"); MODES+=("ac")
+  # Prefer the proven VyOS 5 GHz 802.11ac path even if the PHY also advertises HE/AX.
+  # On this ROCK 5B setup, VyOS mode ax on 5 GHz fell back to 40 MHz/non-HE, while
+  # ac + VHT80 is stable and reaches 80 MHz with 2x2 client links when negotiated.
+  if [ "$VHT5" -eq 1 ]; then
+    LABELS+=("5GHz Fast / 802.11ac / 80MHz"); MODES+=("ac")
   elif [ "$HT5" -eq 1 ]; then
     LABELS+=("5GHz / 802.11n"); MODES+=("n")
   else
@@ -498,6 +499,7 @@ echo ""
 echo "Selected: $PHY / $DRIVER / $BUS / MAC $MAC"
 echo "VyOS-Interface: $VYOS_IF"
 echo "AP: SSID '$SSID', mode $WLAN_MODE, channel $CHANNEL, address $AP_ADDRESS, country $REG_COUNTRY"
+[ "$WLAN_MODE" = "ac" ] && echo "5GHz profile: AC80 stable (HT40+ / VHT80 / short-GI 80)"
 echo "DHCP: $DHCP_START bis $DHCP_STOP, Gateway $AP_GATEWAY, Netz $AP_NET"
 WAN_IF_SELECTED="$(select_wan_interface)"
 if [ -n "$WAN_IF_SELECTED" ]; then
@@ -534,6 +536,31 @@ set interfaces wireless "$VYOS_IF" type 'access-point'
 set interfaces wireless "$VYOS_IF" ssid "$SSID"
 set interfaces wireless "$VYOS_IF" channel "$CHANNEL"
 set interfaces wireless "$VYOS_IF" mode "$WLAN_MODE"
+
+# Proven fast 5 GHz profile: explicit VHT80 geometry.
+# The usable-channel filter already excludes DFS/radar channels; in DE this normally
+# leaves 36/40/44/48, all belonging to the 80 MHz block centered on channel 42.
+if [ "$WLAN_MODE" = "ac" ]; then
+  case "$CHANNEL" in
+    36|40|44|48) VHT_CENTER=42 ;;
+    52|56|60|64) VHT_CENTER=58 ;;
+    100|104|108|112) VHT_CENTER=106 ;;
+    116|120|124|128) VHT_CENTER=122 ;;
+    132|136|140|144) VHT_CENTER=138 ;;
+    149|153|157|161) VHT_CENTER=155 ;;
+    *) VHT_CENTER="" ;;
+  esac
+
+  if [ -n "$VHT_CENTER" ]; then
+    set interfaces wireless "$VYOS_IF" capabilities ht channel-set-width 'ht40+'
+    set interfaces wireless "$VYOS_IF" capabilities vht channel-set-width '1'
+    set interfaces wireless "$VYOS_IF" capabilities vht center-channel-freq freq-1 "$VHT_CENTER"
+    set interfaces wireless "$VYOS_IF" capabilities vht short-gi '80'
+  else
+    echo "WARNING: Channel $CHANNEL has no known 80 MHz center mapping; using plain 802.11ac without forced VHT80." >&2
+  fi
+fi
+
 set interfaces wireless "$VYOS_IF" security wpa mode 'wpa2'
 set interfaces wireless "$VYOS_IF" security wpa cipher 'CCMP'
 set interfaces wireless "$VYOS_IF" security wpa passphrase "$PASSPHRASE"
