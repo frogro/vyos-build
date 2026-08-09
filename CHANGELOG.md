@@ -42,6 +42,24 @@ Updated base-layer release; not a flashable VyOS image on its own.
 - Added a `SHA256SUMS` release asset for integrity verification.
 
 
+## [Rolling update 2026-08-09] - 2026-08-09
+
+### FM350-GL / WWAN
+
+- Updated `modem-connect.sh` from v5.3 to v5.9.
+- Added state-based FM350 USB/RNDIS boot readiness detection.
+- Added real data-path validation on `eth1` instead of relying only on interface, IPv4 and route state.
+- Added health monitoring for `rndis_host` / `NETDEV WATCHDOG` transmit-queue stalls.
+- Added staged FM350 recovery: `rndis_host` rebind first, controlled modem/radio reconnect only if required.
+- Prevented stale RNDIS IP/gateway state from being restored after FM350 USB re-enumeration.
+- Added automatic detection of FM350 USB device-generation changes.
+- Separated persistent VyOS NAT configuration from dynamic FM350 IPv4, gateway and default-route runtime state.
+- Prevented redundant VyOS boot-time commits when the persistent WWAN configuration is already active.
+- Added VyOS router/bootstrap and configuration-lock awareness.
+- Kept cellular fallback routing consistently at metric 200.
+- Improved coordination between modem unlock, modem connect, recovery and WAN failover services.
+- Verified automatic FM350 startup after reboot with `eth1` online, reachable gateway and working external data path.
+
 ## [v2026.08.09-rock5b] - 2026-08-09
 
 Updated ROCK 5B community image with improved 5 GHz Wi-Fi configuration, USB modem handling, and first-boot networking.
