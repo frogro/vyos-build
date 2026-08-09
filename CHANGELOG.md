@@ -44,13 +44,34 @@ Updated base-layer release; not a flashable VyOS image on its own.
 
 ## [v2026.08.09-rock5b] - 2026-08-09
 
-- ROCK 5B: 5 GHz AP setup now prefers the proven 802.11ac path instead of experimental 5 GHz AX.
-- Added explicit 80 MHz VHT configuration for 5 GHz AC: HT40+, VHT80 center-channel mapping and short GI 80.
-- Added fast 5 GHz profile label: `5GHz Fast / 802.11ac / 80MHz`.
-- Preserved existing AP/DHCP/SSH/Ethernet-WAN setup behavior.
-- FM350 USB/RNDIS continues to be excluded from Ethernet-WAN candidate detection.
-- Verified on wlan0 with channel 36 / 80 MHz and negotiated VHT client rates up to 780 Mbit/s NSS2.
+Updated ROCK 5B community image with improved 5 GHz Wi-Fi configuration, USB modem handling, and first-boot networking.
 
+### Wireless AP
+- Changed the preferred 5 GHz AP mode from experimental 802.11ax to the proven 802.11ac path.
+- Added explicit 80 MHz VHT configuration for 5 GHz:
+  - HT40+
+  - VHT80
+  - automatic 80 MHz center-channel mapping
+  - short GI 80
+- Added the `5GHz Fast / 802.11ac / 80MHz` profile to the interactive AP setup.
+- Verified on `wlan0` with channel 36 / 80 MHz and negotiated VHT client links up to 780 Mbit/s with NSS2.
+- 2.4 GHz Wi-Fi 6 / 802.11ax support remains available when supported by the selected adapter.
+- Wireless adapter selection and persistent MAC binding remain supported.
+
+### FM350 / WWAN
+- FM350-GL USB/RNDIS remains supported as the cellular fallback WAN.
+- FM350 RNDIS interfaces are excluded from normal Ethernet-WAN auto-detection.
+- FCC unlock and AT/RNDIS connection handling remain integrated with the modem startup workflow.
+- Ethernet WAN remains preferred when available; cellular WAN can be used as fallback.
+
+### Networking
+- Preserved Photobooth AP, DHCP, DNS forwarding, SSH and NAT setup.
+- AP setup continues to work when no Ethernet carrier is present.
+- Ethernet WAN can be added later by reconnecting a cable and rerunning the setup.
+
+### Image
+- ROCK 5B flashable image built from the `rolling` branch.
+- SHA256 checksum is supplied with the release assets.
 ## [v2026.08.07-rock5b] - 2026-08-07
 
 Updated community build with improved modem handling, locale initialization, and image security.
