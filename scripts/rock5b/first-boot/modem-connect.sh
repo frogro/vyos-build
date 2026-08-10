@@ -1,5 +1,6 @@
 #!/bin/vbash
-# Optimized ROCK 5B variant v5.17: retain v5.16 ghost-bearer recovery and fix RM505Q always-connected handling after completed oneshot services.
+# Optimized ROCK 5B variant v5.18: apply ModemManager bearer runtime IPv4/routing before bound data-path validation and persist complete WWAN failover state.
+# Retains v5.17 ghost-bearer, stuck-control-plane and always-connected recovery.
 # active/exited modem-connect/modem-unlock units with MainPID=0 are treated as completed/idle, so a missing ModemManager bearer can trigger the fast reconnect path instead of waiting for the slower data-path fallback.
 #
 # modem-connect.sh
@@ -43,6 +44,7 @@ WWAN_ROUTE_DISTANCE="${WWAN_ROUTE_DISTANCE:-200}"
 # Both are intentionally less preferred than the normal wired WAN.
 WWAN_ROUTE_METRIC="${WWAN_ROUTE_METRIC:-200}"
 WWAN_NAT_RULE="${WWAN_NAT_RULE:-160}"
+WWAN_FORWARD_RULE="${WWAN_FORWARD_RULE:-11}"
 WIRED_NAT_RULE="${WIRED_NAT_RULE:-100}"
 SELF_PATH="$(readlink -f "$0")"
 SERVICE_PATH="/etc/systemd/system/modem-connect.service"
@@ -2615,11 +2617,6 @@ connect_mm() {
     warn "Bearer/$CONNECTED_BEARER is not usable"
     return 1
   }
-  mm_bearer_data_path_alive "$CONNECTED_BEARER" || {
-    warn "Bearer/$CONNECTED_BEARER is marked connected but its bound WWAN data path is not alive"
-    return 1
-  }
-
   current_info="$(mmcli -m "$MODEM" -K 2>/dev/null || true)"
   current_state="$(printf '%s\n' "$current_info" | kv_get modem.generic.state)"
   [ "$current_state" = connected ] || {
@@ -2662,6 +2659,33 @@ connect_mm() {
     GATEWAY="$(ip -4 route show default dev "$NET_IF" | awk 'NR==1 {for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')"
   fi
 
+  # v5.18: ModemManager reports static bearer addressing separately from
+  # configuring the Linux WWAN interface.  The bound health probe therefore
+  # must run only AFTER IPv4/MTU and a real fallback route exist.
+  #
+  # Never use "ip route replace default" here: that could replace the working
+  # Ethernet default.  Remove only a route belonging to this WWAN device and
+  # recreate it with the unified fallback metric.
+  if [ "$IP_METHOD" != ppp ]; then
+    [ -n "$GATEWAY" ] && [ "$GATEWAY" != -- ] || {
+      warn "Bearer/$CONNECTED_BEARER did not provide an IPv4 gateway"
+      return 1
+    }
+
+    ip route del default dev "$NET_IF" 2>/dev/null || true
+    if ! ip route add default via "$GATEWAY" dev "$NET_IF" metric "$WWAN_ROUTE_METRIC"; then
+      warn "Could not install ModemManager WWAN fallback route via $GATEWAY dev $NET_IF metric $WWAN_ROUTE_METRIC"
+      return 1
+    fi
+  fi
+
+  if ! mm_bearer_data_path_alive "$CONNECTED_BEARER"; then
+    [ "$IP_METHOD" = ppp ] || ip route del default dev "$NET_IF" 2>/dev/null || true
+    warn "Bearer/$CONNECTED_BEARER is marked connected but its bound WWAN data path is not alive after runtime IPv4/routing was applied"
+    return 1
+  fi
+
+  log "ModemManager Bearer/$CONNECTED_BEARER runtime data path is alive on $NET_IF."
   BACKEND_USED=mm
   return 0
 }
@@ -3777,6 +3801,11 @@ OLD_GATEWAY=""
 wait_for_vyos_config_runtime
 ACTIVE_BEFORE="$(/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands 2>/dev/null || true)"
 
+AP_FIREWALL_PRESENT=0
+if printf '%s\n' "$ACTIVE_BEFORE" | grep -Fq "set firewall ipv4 name PHOTOBOOTH-WAN-IN "; then
+  AP_FIREWALL_PRESENT=1
+fi
+
 WIRED_CONFIGURED=0
 WIRED_USE_DHCP=0
 WIRED_ADD_DHCP=0
@@ -3814,12 +3843,21 @@ EOF
 
 # Ethernet/AP/DHCP/NAT are owned by ap-dhcp-wan-setup.sh.
 # Do not delete, recreate, commit or otherwise touch the wired WAN here.
+# The modem script owns only the WWAN-specific NAT and return-traffic binding.
 printf 'delete nat source rule %q 2>/dev/null || true\n' "$WWAN_NAT_RULE" >> "$VYOS_CONFIG_HELPER"
+printf 'delete firewall ipv4 forward filter rule %q 2>/dev/null || true\n' "$WWAN_FORWARD_RULE" >> "$VYOS_CONFIG_HELPER"
+
 if [ "$WWAN_CONNECTED" -eq 1 ]; then
   printf 'set nat source rule %q description %q\n' "$WWAN_NAT_RULE" 'AP-NET-to-WWAN' >> "$VYOS_CONFIG_HELPER"
   printf 'set nat source rule %q outbound-interface name %q\n' "$WWAN_NAT_RULE" "$NET_IF" >> "$VYOS_CONFIG_HELPER"
   printf 'set nat source rule %q source address %q\n' "$WWAN_NAT_RULE" "$AP_NET" >> "$VYOS_CONFIG_HELPER"
   printf 'set nat source rule %q translation address masquerade\n' "$WWAN_NAT_RULE" >> "$VYOS_CONFIG_HELPER"
+
+  if [ "$AP_FIREWALL_PRESENT" -eq 1 ]; then
+    printf 'set firewall ipv4 forward filter rule %q action jump\n' "$WWAN_FORWARD_RULE" >> "$VYOS_CONFIG_HELPER"
+    printf 'set firewall ipv4 forward filter rule %q inbound-interface name %q\n' "$WWAN_FORWARD_RULE" "$NET_IF" >> "$VYOS_CONFIG_HELPER"
+    printf 'set firewall ipv4 forward filter rule %q jump-target %q\n' "$WWAN_FORWARD_RULE" 'PHOTOBOOTH-WAN-IN' >> "$VYOS_CONFIG_HELPER"
+  fi
 fi
 
 if [ -n "$OLD_GATEWAY" ] && { [ "$WWAN_CONNECTED" -eq 0 ] || [ "$DYNAMIC_WWAN_ROUTE" -eq 1 ] || [ "$OLD_GATEWAY" != "$GATEWAY" ]; }; then
@@ -3854,8 +3892,9 @@ EOF
 chmod 0700 "$VYOS_CONFIG_HELPER"
 
 vyos_desired_config_active() {
-  local active_cfg nat_ok=1 route_cfg_ok=1 wired_ok=1
+  local active_cfg nat_ok=1 route_cfg_ok=1 wired_ok=1 firewall_ok=1 ap_fw_present=0
   active_cfg="$(/opt/vyatta/bin/vyatta-op-cmd-wrapper show configuration commands 2>/dev/null || true)"
+  printf '%s\n' "$active_cfg" | grep -Fq "set firewall ipv4 name PHOTOBOOTH-WAN-IN " && ap_fw_present=1
   if [ "$WWAN_CONNECTED" -eq 1 ]; then
     nat_ok=0
     route_cfg_ok=0
@@ -3875,13 +3914,22 @@ vyos_desired_config_active() {
       # both gateway and distance so v5.11 upgrades old distance=10 configs.
       printf '%s\n' "$active_cfg" |         grep -Fq "set protocols static route 0.0.0.0/0 next-hop $GATEWAY distance '$WWAN_ROUTE_DISTANCE'" && route_cfg_ok=1
     fi
+
+    if [ "$ap_fw_present" -eq 1 ]; then
+      firewall_ok=0
+      if printf '%s\n' "$active_cfg" | grep -Fq "set firewall ipv4 forward filter rule $WWAN_FORWARD_RULE inbound-interface name '$NET_IF'" && \
+         printf '%s\n' "$active_cfg" | grep -Fq "set firewall ipv4 forward filter rule $WWAN_FORWARD_RULE jump-target 'PHOTOBOOTH-WAN-IN'"; then
+        firewall_ok=1
+      fi
+    fi
   else
     printf '%s\n' "$active_cfg" | grep -Fq "set nat source rule $WWAN_NAT_RULE " && nat_ok=0
+    printf '%s\n' "$active_cfg" | grep -Fq "set firewall ipv4 forward filter rule $WWAN_FORWARD_RULE " && firewall_ok=0
     [ -n "$OLD_GATEWAY" ] && printf '%s\n' "$active_cfg" | grep -Fq "set protocols static route 0.0.0.0/0 next-hop $OLD_GATEWAY" && route_cfg_ok=0
   fi
   # Wired WAN configuration is intentionally outside this script.
   wired_ok=1
-  [ "$nat_ok" -eq 1 ] && [ "$route_cfg_ok" -eq 1 ] && [ "$wired_ok" -eq 1 ]
+  [ "$nat_ok" -eq 1 ] && [ "$route_cfg_ok" -eq 1 ] && [ "$wired_ok" -eq 1 ] && [ "$firewall_ok" -eq 1 ]
 }
 
 COMMIT_OK=0

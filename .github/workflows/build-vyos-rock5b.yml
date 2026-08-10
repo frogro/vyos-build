@@ -88,6 +88,8 @@ jobs:
           WORKDIR=$(mktemp -d)
           sudo tar xzf out-merged/vyos-rootfs-rock5b-merged.tar.gz -C "$WORKDIR"
           sudo ./repo/scripts/rock5b/inject-defaults.sh "$WORKDIR" repo/scripts/rock5b/first-boot
+          chmod +x repo/scripts/rock5b/install-network-firmware.sh
+          sudo ./repo/scripts/rock5b/install-network-firmware.sh "$WORKDIR"
           cd "$WORKDIR"
           sudo tar czf "${GITHUB_WORKSPACE}/out-merged/vyos-rootfs-rock5b-merged.tar.gz" .
           cd "${GITHUB_WORKSPACE}"

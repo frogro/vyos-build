@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### ROCK 5B networking
+
+- Updated `modem-connect.sh` from v5.17 to v5.18.
+- Fixed ModemManager static-bearer initialization ordering: apply bearer IPv4, prefix, MTU and WWAN fallback route before strict bound data-path validation.
+- Normalized ModemManager WWAN runtime default routes to metric 200 without replacing the preferred wired default route.
+- Added dynamic AP return-traffic firewall binding for the active WWAN interface when the `PHOTOBOOTH-WAN-IN` chain exists.
+- Kept RM505Q-AE ghost-bearer, stuck-control-plane and always-connected recovery logic.
+- Updated `ap-dhcp-wan-setup.sh` from v8.2 to v8.3 and explicitly bind the VyOS wireless interface to the selected physical PHY.
+- Kept the existing Armbian firmware as the ROCK 5B base and added the network firmware supplement after the Armbian/VyOS merge.
+- Added a ROCK-specific missing-only network firmware supplement pinned to upstream `linux-firmware` release `20260622`.
+- Supplement covers MediaTek Wi-Fi 6/6E/7, Realtek `rtw88`/`rtw89` and Bluetooth/NIC firmware, plus Intel `iwlwifi` and Bluetooth firmware.
+- The existing Armbian image remains the kernel, module and boot-chain source; no Armbian image rebuild is required.
+
+
 ## [v2026.08.10-rock5b] - 2026-08-10
 
 ### Release

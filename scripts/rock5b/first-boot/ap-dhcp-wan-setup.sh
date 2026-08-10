@@ -1,5 +1,5 @@
 #!/bin/vbash
-# VyOS wireless AP, DHCP, and optional Ethernet WAN setup for ROCK 5B - Version 8.2 - stable 5GHz AC80 profile and cellular-WAN filtering
+# VyOS wireless AP, DHCP, and optional Ethernet WAN setup for ROCK 5B - Version 8.3 - stable 5GHz AC80 profile, explicit PHY binding and cellular-WAN filtering
 # Erkennt alle WLAN-devicee, laesst einen AP-faehigen Adapter auswaehlen,
 # persistently binds the VyOS configuration to the selected MAC address,
 # configures the local DHCP server, and optionally enables Ethernet WAN with NAT,
@@ -531,6 +531,7 @@ done
 set system wireless country-code "$COUNTRY_CODE"
 set service ssh
 set interfaces wireless "$VYOS_IF" hw-id "$MAC"
+set interfaces wireless "$VYOS_IF" physical-device "$PHY"
 set interfaces wireless "$VYOS_IF" address "$AP_ADDRESS"
 set interfaces wireless "$VYOS_IF" type 'access-point'
 set interfaces wireless "$VYOS_IF" ssid "$SSID"
