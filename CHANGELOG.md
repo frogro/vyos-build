@@ -4,6 +4,30 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v2026.08.10-rock5b] - 2026-08-10
+
+### Release
+
+- Published a new flashable VyOS rolling image for the Radxa ROCK 5B.
+- Image source commit: `5a79b3ef` (`Update ROCK 5B modem handling to v5.17`).
+- GitHub Actions build run: `31342781433`.
+- Build completed successfully using the rolling VyOS build and the Armbian-based ROCK 5B kernel/boot integration.
+- Release assets:
+  - `vyos-rock5b-fresh.img.xz`
+  - `SHA256SUMS`
+- Image SHA-256: `d25698df4d0c045943795608ae3ac6c3e07a89c32b9f3f8d4b10e82889a67f04`.
+- This release includes the cellular/WWAN rolling updates from 2026-08-09 and 2026-08-10.
+
+### Cellular highlights
+
+- Fibocom FM350-GL USB/RNDIS boot, health monitoring and staged recovery improvements.
+- FM350 USB generation tracking prevents restoration of stale PDP/RNDIS address and gateway state after USB re-enumeration.
+- Dynamic FM350 Linux WWAN routes use fallback metric 200.
+- Quectel RM505Q-AE PCIe/MHI support through ModemManager was extended with bearer validation, ghost-bearer recovery and stuck-control-plane recovery.
+- RM505Q always-connected recovery now correctly treats completed systemd `active (exited)` oneshot services with `MainPID=0` as idle.
+- RM505Q regression testing verified automatic Bearer/8 -> Bearer/9 recovery in approximately 6 seconds after an explicit ModemManager disconnect.
+- Persistent VyOS WWAN routes use distance 200 and runtime Linux WWAN fallback routes use metric 200.
+
 ## [Rolling update 2026-08-10] - 2026-08-10
 
 ### Cellular / WWAN
