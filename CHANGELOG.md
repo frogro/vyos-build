@@ -6,19 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v2026.08.10-rock5b-r2] - 2026-08-10
+
+### Release
+
+- Published a new flashable VyOS rolling image for the Radxa ROCK 5B.
+- Image source commit: `16223795` (`Update ROCK 5B networking to modem v5.18 and add WiFi firmware`).
+- GitHub Actions build run: `31418029665`.
+- VyOS image version: `1.5-rolling-202608101821`.
+- Release assets:
+  - `vyos-rock5b-fresh.img.xz`
+  - `SHA256SUMS`
+- Image SHA-256: `02bfe73fb05752c9fed2868215d7ae4eb4b1fc3282a8bcae7cfc85de5ce6ca0d`.
+- Build, XZ integrity and generated SHA-256 checksum were verified before release.
+
 ### ROCK 5B networking
 
 - Updated `modem-connect.sh` from v5.17 to v5.18.
-- Fixed ModemManager static-bearer initialization ordering: apply bearer IPv4, prefix, MTU and WWAN fallback route before strict bound data-path validation.
+- Fixed ModemManager static-bearer initialization ordering: bearer IPv4, prefix, MTU and WWAN fallback route are applied before strict bound data-path validation.
 - Normalized ModemManager WWAN runtime default routes to metric 200 without replacing the preferred wired default route.
 - Added dynamic AP return-traffic firewall binding for the active WWAN interface when the `PHOTOBOOTH-WAN-IN` chain exists.
 - Kept RM505Q-AE ghost-bearer, stuck-control-plane and always-connected recovery logic.
-- Updated `ap-dhcp-wan-setup.sh` from v8.2 to v8.3 and explicitly bind the VyOS wireless interface to the selected physical PHY.
+- Updated `ap-dhcp-wan-setup.sh` from v8.2 to v8.3 and explicitly bound the VyOS wireless interface to the selected physical PHY.
 - Kept the existing Armbian firmware as the ROCK 5B base and added the network firmware supplement after the Armbian/VyOS merge.
 - Added a ROCK-specific missing-only network firmware supplement pinned to upstream `linux-firmware` release `20260622`.
 - Supplement covers MediaTek Wi-Fi 6/6E/7, Realtek `rtw88`/`rtw89` and Bluetooth/NIC firmware, plus Intel `iwlwifi` and Bluetooth firmware.
 - The existing Armbian image remains the kernel, module and boot-chain source; no Armbian image rebuild is required.
 
+### Verified on hardware
+
+- Fresh boot verified on the Radxa ROCK 5B without manually installing additional firmware.
+- MediaTek MT7922 PCIe Wi-Fi initialized with `mt7921e`; required MT7922 Wi-Fi and Bluetooth firmware is present in the image.
+- `Photobooth` access point verified on `phy0` / `wlan0` at 5 GHz, channel 36, VHT80/802.11ac.
+- VyOS `physical-device 'phy0'` binding verified with AP setup v8.3.
+- DHCP verified with a real WLAN client receiving an address from `10.3.141.51-10.3.141.250`.
+- AP-to-Ethernet NAT and Internet access verified from a WLAN client.
+- Quectel RM505Q-AE PCIe/MHI connection verified through ModemManager with `modem-connect.sh` v5.18.
+- RM505Q-AE runtime IPv4 configuration and bound `wwan0` data-path validation completed without manual route or address repair.
+- WWAN NAT rule 160 and dynamic `PHOTOBOOTH-WAN-IN` firewall forward rule 11 were verified on `wwan0`.
+- Ethernet remained preferred with metric 20 while WWAN remained available as fallback with metric 200.
+- Physical Ethernet disconnect successfully failed over WLAN-client Internet traffic to the RM505Q-AE/WWAN connection.
+- Reconnecting Ethernet automatically restored Ethernet as the preferred default route while keeping WWAN available as fallback.
 
 ## [v2026.08.10-rock5b] - 2026-08-10
 
