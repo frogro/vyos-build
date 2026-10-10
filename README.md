@@ -1,5 +1,20 @@
 # VyOS for Radxa ROCK 5B
 
+## Development continues at VyARM-Community
+
+> [!IMPORTANT]
+> Further development for **Radxa ROCK 5B** continues at **[VyARM-Community/rock-5b](https://github.com/VyARM-Community/rock-5b)**. Use that repository for current images, release notes, installation instructions and updates.
+
+The project has moved to [VyARM-Community](https://github.com/VyARM-Community) to bring the board images closer to the original VyOS build and system-image update model:
+
+- **Closer to upstream VyOS:** the new builds use a board-adapted VyOS kernel and matching modules, with the hardware-specific firmware and boot integration needed by each board. This replaces the earlier combination of VyOS userspace with a separate Armbian hardware-base kernel.
+- **A dedicated update channel for each board:** the new images have their own board-specific channel for `add system image latest`, pointing to the matching community ISO instead of an official AMD64 image. See the [current update instructions](https://github.com/VyARM-Community/rock-5b#updates) for setup, availability and rollback.
+- **Shared maintenance:** board adaptations and build infrastructure are maintained together, while downloads and update channels remain separate for each board.
+
+The documentation and releases below describe the earlier implementation. Existing installations are not automatically migrated by this notice; follow the new repository's installation instructions when moving to the new images. VyARM-Community remains an independent, unofficial community project.
+
+---
+
 > Unofficial community build of **VyOS Rolling** for the **Radxa ROCK 5B**.
 
 [![GitHub Release](https://img.shields.io/github/v/release/frogro/vyos-build?style=for-the-badge)](https://github.com/frogro/vyos-build/releases)
